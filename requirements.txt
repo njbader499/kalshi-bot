@@ -1,0 +1,7 @@
+# Runtime deps, pinned exactly. Each name checked on pypi.org (2026-11-04).
+httpx==0.28.1
+cryptography==50.0.2
+pydantic==2.14.2
+pydantic-settings==2.16.2
+PyYAML==6.0.3
+# Added in later phases (pinned when introduced): websockets, aiosqlite, numpy, scipy

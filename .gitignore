@@ -1,0 +1,25 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+keys/
+# runtime
+data/
+logs/
+*.db
+*.db-wal
+*.db-shm
+.prod_confirmed
+KILL
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+*.egg-info/
+config/config.yaml

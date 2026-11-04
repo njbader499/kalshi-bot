@@ -1,0 +1,30 @@
+[project]
+name = "kalshi-maker"
+version = "0.1.0"
+description = "Maker-only Kalshi trading bot (demo by default)"
+requires-python = ">=3.12"
+
+[tool.setuptools.packages.find]
+include = ["kalshi_maker*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["integration: hits the live Kalshi demo API (opt-in via KALSHI_INTEGRATION=1)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]

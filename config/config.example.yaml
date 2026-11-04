@@ -1,0 +1,68 @@
+# Kalshi maker bot configuration. Copy to config/config.yaml.
+# Secrets do NOT go here; they go in .env (see .env.example).
+# Every value is validated at load. The bot refuses to start if anything is absurd.
+
+# Hosts are configurable because Kalshi has moved them before.
+# Source: docs.kalshi.com/getting_started/api_environments (checked 2026-11-04 via search summary).
+hosts:
+  demo:
+    rest: "https://external-api.demo.kalshi.co/trade-api/v2"
+    ws: "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
+  prod:
+    rest: "https://external-api.kalshi.com/trade-api/v2"
+    ws: "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+
+# Risk limits for a $500 bankroll (Section 7). Dollars, as strings, parsed with Decimal.
+risk:
+  bankroll: "500"
+  max_capital_deployed: "300"
+  max_cost_per_market: "50"
+  max_cost_per_event: "75"
+  max_cost_per_category: "150"
+  max_order_cost: "15"
+  max_resting_orders: 40
+  max_markets_quoted: 3          # 3 while in demo; spec default for later is 10
+  daily_loss_stop: "25"
+  weekly_loss_stop: "60"
+  max_drawdown: "100"
+  max_orders_per_minute: 30
+  max_consecutive_api_errors: 5
+  api_error_pause_seconds: 300
+  stale_data_seconds: 30
+  allow_taker_flatten: false
+
+# Rate limiter. Basic tier per the docs: 200 read / 100 write tokens per second,
+# most requests cost 10 tokens. Per-endpoint overrides go in endpoint_costs.
+# At startup the bot can read GET /account/endpoint_costs (UNVERIFIED path) to refine this.
+rate_limits:
+  read_tokens_per_sec: 200
+  write_tokens_per_sec: 100
+  default_cost: 10
+  burst_seconds: 1
+  endpoint_costs: {}
+  max_retries: 5
+  backoff_base_seconds: 0.5
+  backoff_max_seconds: 30
+
+# Fees. fee = ceil_to_cent(rate * contracts * P * (1 - P)).
+# Maker rate defaults to 0. Any series with a nonzero maker rate is excluded unless listed here.
+fees:
+  taker_rate: "0.07"
+  default_maker_rate: "0"
+  allowed_maker_fee_series: []
+
+# Exclusions (Section 6).
+exclusions:
+  banned_categories: ["Sports", "Politics", "Elections", "Entertainment", "Mentions", "Media"]
+  banned_ticker_patterns: ["^KXMV", "MULTIGAME", "PARLAY"]
+  min_time_to_close_minutes: 60
+
+paths:
+  data_dir: "./data"
+  log_dir: "./logs"
+  kill_file: "./KILL"
+
+logging:
+  level: "INFO"
+  max_bytes: 10485760
+  backup_count: 10
