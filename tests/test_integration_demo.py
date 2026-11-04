@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import os
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -73,22 +74,39 @@ async def test_clock_within_tolerance(api, settings) -> None:
     assert not chk.exceeds(settings.config.safety.clock_drift_warn_seconds)
 
 
-async def _far_market(api) -> tuple[str, TickGrid]:
-    """An open weather market whose best YES bid is above the lowest tick."""
-    async for m in api.iter_markets(status="open", limit=200):
-        t = m.get("ticker", "")
-        if not t.startswith(("KXHIGH", "KXLOW")):
-            continue
+async def _far_market(api, series: list[str]) -> tuple[str, TickGrid]:
+    """An open market in the configured series whose YES ask is above the lowest tick."""
+    for st in series:
+        async for m in api.iter_markets(series_ticker=st, status="open", limit=200):
+            try:
+                grid = TickGrid.from_market(m)
+            except Exception:
+                continue
+            ob = await api.get_orderbook(m["ticker"])
+            best_no = ob.best_no_bid
+            # YES ask = 1 - best NO bid; a bid at min_price must stay strictly below it.
+            if best_no is None or (1 - best_no) > grid.min_price:
+                return m["ticker"], grid
+    pytest.skip(f"no suitable open market in {series} on demo right now")
+
+
+async def _wait_order(api, oid: str, pred, timeout: float = 15.0) -> dict:
+    """REST reads lag the matching engine (docs: get-user-data-timestamp), so poll."""
+    import asyncio
+
+    from kalshi_maker.rest import KalshiAPIError
+
+    deadline = time.monotonic() + timeout
+    while True:
         try:
-            grid = TickGrid.from_market(m)
-        except Exception:
-            continue
-        ob = await api.get_orderbook(t)
-        best_no = ob.best_no_bid
-        # YES ask = 1 - best NO bid; a bid at min_price must stay strictly below it.
-        if best_no is None or (1 - best_no) > grid.min_price:
-            return t, grid
-    pytest.skip("no open KXHIGH/KXLOW market on demo right now")
+            o = await api.get_order(oid)
+        except KalshiAPIError as e:
+            if e.status != 404 or time.monotonic() > deadline:
+                raise
+            o = {}  # not visible to reads yet
+        if (o and pred(o)) or time.monotonic() > deadline:
+            return o
+        await asyncio.sleep(0.5)
 
 
 async def test_post_only_order_lifecycle(api, settings) -> None:
@@ -98,7 +116,7 @@ async def test_post_only_order_lifecycle(api, settings) -> None:
             f"demo balance is ${bal.balance}: add demo funds on demo.kalshi.co to run the "
             "order round-trip (it costs at most a cent)"
         )
-    ticker, grid = await _far_market(api)
+    ticker, grid = await _far_market(api, settings.config.markets.weather_series)
     exp = int(time.time()) + settings.config.safety.order_expiry_seconds
     order = OrderRequest(
         ticker=ticker,
@@ -110,12 +128,16 @@ async def test_post_only_order_lifecycle(api, settings) -> None:
     )
     created = await api.create_order_idempotent(order, grid)
     oid = created["order_id"]
+    cancelled = None
     try:
-        live = await api.get_order(oid)
+        assert Decimal(created["fill_count"]) == 0, "post-only bid must not fill on placement"
+        assert Decimal(created["remaining_count"]) == 1
+        live = await _wait_order(api, oid, lambda o: o.get("status") == "resting")
         assert live["client_order_id"] == order.client_order_id
         assert live["status"] == "resting"
-        # expiry-only amend: same price + total count, later expiration
-        await api.amend_order(
+        assert Decimal(live["yes_price_dollars"]) == order.price
+        # expiry-only amend: same price + total count, later expiration (keeps queue spot)
+        amended = await api.amend_order(
             oid,
             ticker=ticker,
             side="bid",
@@ -123,15 +145,26 @@ async def test_post_only_order_lifecycle(api, settings) -> None:
             count=order.count,
             expiration_time=exp + 120,
         )
-        live = await api.get_order(oid)
+        assert amended["order_id"] == oid
+        want = datetime.fromtimestamp(exp + 120, UTC)
+        live = await _wait_order(api, oid, lambda o: _parse(o.get("expiration_time")) == want)
+        assert _parse(live.get("expiration_time")) == want, live.get("expiration_time")
         assert live["status"] == "resting"
     finally:
-        await api.cancel_order(oid, ticker)
-    # reconcile: it must no longer be resting
-    after = await api.get_order(oid)
+        cancelled = await api.cancel_order(oid, ticker)
+    # the cancel response is authoritative: 1 contract removed from the book
+    assert cancelled["order_id"] == oid
+    assert Decimal(cancelled["reduced_by"]) == 1
+    after = await _wait_order(api, oid, lambda o: o.get("status") == "canceled")
     assert after["status"] == "canceled"
     resting = [o async for o in api.iter_orders(ticker=ticker, status="resting")]
     assert oid not in {o["order_id"] for o in resting}
+
+
+def _parse(v):
+    if not v:
+        return None
+    return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
 
 
 async def test_ws_books_match_rest(api, settings) -> None:

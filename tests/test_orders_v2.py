@@ -267,17 +267,38 @@ async def test_idempotent_create_recovers_by_client_order_id(limits) -> None:
 
 async def test_idempotent_create_unknown_is_raised_not_resent(limits) -> None:
     posts = []
+    lookups = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "POST":
             posts.append(1)
             raise httpx.ReadTimeout("timeout", request=req)
+        lookups.append(1)
         return httpx.Response(200, json={"orders": [], "cursor": ""})
 
     async with _client(handler, limits) as api:
         with pytest.raises(OrderOutcomeUnknown):
             await api.create_order_idempotent(_order(), CENT_GRID, NOW)
     assert len(posts) == 1
+    assert len(lookups) == 4  # read lag: retried lookups, never a re-send
+
+
+async def test_idempotent_lookup_survives_read_lag(limits) -> None:
+    o = _order()
+    lookups = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.method == "POST":
+            return httpx.Response(504)
+        lookups.append(1)
+        orders = (
+            [] if len(lookups) < 3 else [{"order_id": "o5", "client_order_id": o.client_order_id}]
+        )
+        return httpx.Response(200, json={"orders": orders, "cursor": ""})
+
+    async with _client(handler, limits) as api:
+        r = await api.create_order_idempotent(o, CENT_GRID, NOW)
+    assert r["order_id"] == "o5" and len(lookups) == 3
 
 
 async def test_definite_rejection_is_not_looked_up(limits) -> None:

@@ -45,6 +45,8 @@ log = logging.getLogger(__name__)
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 API_PREFIX = "/trade-api/v2"
 BALANCE_PATH = "/portfolio/balance"
+LOOKUP_ATTEMPTS = 4
+LOOKUP_DELAY_S = 2.0
 
 
 class KalshiAPIError(Exception):
@@ -541,7 +543,16 @@ class KalshiREST:
             ambiguous: Exception = e
         except httpx.TransportError as e:
             ambiguous = e
-        found = await self.find_order_by_client_id(order.ticker, order.client_order_id, sent_at)
+        # REST reads lag the matching engine by up to a few seconds (seen live on demo:
+        # GET /portfolio/orders/{id} returned 404 right after a 201 create), so a single
+        # miss doesn't prove the order is absent. Poll a few times before giving up.
+        found = None
+        for i in range(LOOKUP_ATTEMPTS):
+            if i:
+                await self._sleep(LOOKUP_DELAY_S)
+            found = await self.find_order_by_client_id(order.ticker, order.client_order_id, sent_at)
+            if found is not None:
+                break
         if found is not None:
             return {
                 "order_id": found.get("order_id"),

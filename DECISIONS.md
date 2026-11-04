@@ -114,7 +114,24 @@ before it's coded. **I'll raise this at the Phase 3 start.**
 - Demo KXHIGHNY uses the tapered grid (0.001 ticks below $0.10 and above $0.90, 0.01
   between). Sub-cent ticks are real on weather markets.
 - The V2 create body passed validation and failed only on `insufficient_balance` (demo
-  balance $0). The order round-trip test waits for demo funds.
+  balance $0). After funding ($500 demo), **the order round-trip passed 3/3 times**:
+  post-only 1-contract YES bid at the lowest tick (create returned `fill_count 0.00`,
+  `remaining_count 1.00`), expiry-only amend (the new `expiration_time` shows on the
+  order), cancel (`reduced_by 1.00`), and the order then reads `canceled` and is absent
+  from resting orders.
+- **REST reads lag the matching engine.** Right after a 201 create,
+  `GET /portfolio/orders/{id}` returned **404**. Right after a successful cancel it still
+  said `resting`. Both resolved within seconds. (The docs say so too: "There is typically a
+  short delay before exchange events are reflected in the API endpoints", see
+  Get User Data Timestamp.) Consequences:
+  * Write responses (create/amend/cancel bodies) and the WS `user_orders`/`fill` channels
+    are the authoritative real-time view. REST reads are for reconciliation.
+  * `create_order_idempotent` polls the client_order_id lookup 4× over about 6 s before
+    declaring the outcome unknown.
+  * Reconcile raising "bot order still resting" right after a cancel can be lag. The gate
+    simply retries the recovery 5 s later, which self-heals.
+- `client_order_id` of 36 chars (`kmb-` + 32 hex) is accepted (resolves the length
+  question).
 - The unfiltered `/markets` list is dominated by KXMV combos, which 404 on
   `GET /markets/{ticker}`. `smoke` now defaults to `--series KXHIGHNY`.
 
@@ -122,7 +139,7 @@ before it's coded. **I'll raise this at the Phase 3 start.**
 
 1. Duplicate `client_order_id` on create → assumed **409 Conflict** (the spec lists 409 for
    create). `create_order_idempotent` treats 409 as "already exists → look it up".
-2. Max `client_order_id` length. The bot sends 36 chars (`kmb-` + 32 hex).
+2. ~~Max `client_order_id` length~~: 36 chars verified live.
 3. `GET /portfolio/orders` has no `client_order_id` filter for direct members (only the FCM
    endpoint has `client_order_ids`), so lookup scans the ticker's orders.
 4. Live confirmation that `use_yes_price` behaves as documented (Phase 2 WS test).
