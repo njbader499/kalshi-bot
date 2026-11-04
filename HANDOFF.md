@@ -3,7 +3,7 @@
 Current state of the Kalshi maker bot, for whoever picks this up next (human or Claude).
 Spec: `KALSHI_MAKER_BOT_PROMPT.md`. Every decision and doc conflict: `DECISIONS.md`.
 
-_Last updated: 2026-11-04 (Phase 3 done in shadow mode; stopped for owner review)._
+_Last updated: 2026-11-04 (shadow collector running; calibration report built)._
 
 ## Where things stand
 
@@ -12,7 +12,7 @@ _Last updated: 2026-11-04 (Phase 3 done in shadow mode; stopped for owner review
 | 1 Skeleton, auth, read-only REST | done, verified live on demo |
 | 1b Windows port, V2 orders, laptop safety | done; **demo order round-trip passes** (place → amend expiry → cancel) |
 | 2 WS books + reconciliation + ledger | done, **approved by owner 2026-11-04** |
-| 3 Weather fair value (shadow mode) | **done, awaiting owner review**. `fair` / `run` log fair vs prod prices; no orders |
+| 3 Weather fair value (shadow mode) | done, approved 2026-11-04. **Shadow collector running** since 2026-11-04 20:46Z |
 | 4+ | not started |
 
 Environment: owner's Windows 11 laptop in Prague (Kalshi reachable directly; never add
@@ -45,6 +45,34 @@ to start otherwise. Never print or log key contents.
 - Settlement source must come from the API rules text, never memory. Stop and ask if it's
   ambiguous.
 - Commit and push after each milestone; stop for review at the end of each phase.
+
+## Shadow collector (running in the background)
+
+Started 2026-11-04 20:46Z. It's `python -m kalshi_maker run` (no orders) under a
+supervisor that restarts it on crashes (backoff 10 s → 5 min). It logs fair value vs prod
+prices every 10 min and checks settlements hourly.
+
+- Code runs from a **git worktree pinned to a commit**: `C:\Users\njbad\kalshi-bot-collector`
+  (currently `57eb7cd`). Editing this repo never affects it until it's re-pinned.
+- Config: `config\collector.yaml` (git-ignored, generated from `config\config.yaml`, with
+  absolute paths). Ledger `data\ledger.db`, logs `logs\collector-YYYYMMDD.log` and
+  `logs\collector-supervisor.log`, KILL file `KILL` in this repo root.
+- Check it: `Get-Content logs\collector-supervisor.log -Tail 5` and the newest
+  `logs\collector-*.log` (a `shadow: logged 36 fair values` line every 10 min).
+- Stop it: `New-Item KILL`. The bot exits with code 10 and the supervisor doesn't restart
+  it. Delete `KILL` before starting again.
+- Start / upgrade: `powershell -ExecutionPolicy Bypass -File .\scripts\start-collector.ps1
+  -Commit <sha>` (stop it first; a second instance refuses to start via `data\run.lock`).
+- It doesn't survive a reboot or logoff (no scheduled task yet). After a reboot, run the
+  start script again. Lid-close sleep pauses it; the continuity monitor resyncs on wake.
+
+## Calibration report
+
+`.\.venv\Scripts\python.exe -m kalshi_maker calibrate [--csv out.csv]`. Run it after **3+
+settled days**. It prints the Brier score of model vs market mid (paired; skill > 0 means
+the model beat the market), reliability by city, and per-station bias with a suggested
+`bias_f`. It's printed twice: all rows, then only rows with confidence ≥ 0.6 (what Phase
+4 would quote). It reads the ledger read-only, so it's safe while the collector runs.
 
 ## Phase 3 state (shadow mode, no orders)
 

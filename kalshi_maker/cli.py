@@ -7,6 +7,7 @@ python -m kalshi_maker markets [--series KXHIGHNY] [--status open] [--max 20]
 python -m kalshi_maker market TICKER
 python -m kalshi_maker orderbook TICKER [--depth 10]
 python -m kalshi_maker run [--max-seconds N]   # Phase 2: books + ledger, NO orders
+python -m kalshi_maker calibrate   # Phase 3: Brier / reliability / bias (after 3+ days)
 python -m kalshi_maker fair        # Phase 3: weather fair value vs bid/ask, NO orders
 python -m kalshi_maker clock          # local clock vs exchange (warns if drift > 1 s)
 python -m kalshi_maker smoke          # all of the above in one go, for Phase 1 sign-off
@@ -70,6 +71,8 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
 
         check_prod_gate(settings, settings.config.paths.data_dir / ".prod_confirmed")
         return await run_bot(settings, _signer(settings), args.max_seconds, args.config)
+    if cmd == "calibrate":
+        return await _calibrate(settings, args)
     if cmd == "fair":
         return await _fair(settings, args)
     if cmd == "check-config":
@@ -199,6 +202,43 @@ async def _fair(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _calibrate(settings: Settings, args: argparse.Namespace) -> int:
+    """Brier / reliability / per-station bias from the shadow log vs PROD outcomes."""
+    from .weather.calibration import (
+        build_report,
+        fetch_outcomes,
+        format_report,
+        join,
+        read_snapshots,
+        write_csv,
+    )
+
+    cfg = settings.config
+    db = args.db or (cfg.paths.data_dir / "ledger.db")
+    if not Path(db).exists():
+        raise ConfigError(f"ledger not found: {db}")
+    snaps = read_snapshots(Path(db))
+    print(f"read {len(snaps)} fair-value snapshots from {db}")
+    async with KalshiREST(cfg.hosts.prod.rest, cfg.rate_limits) as prod:  # public, read-only
+        markets = await fetch_outcomes(prod, {s["ticker"] for s in snaps})
+    rows = join(snaps, markets)
+    print(format_report(build_report(rows, min_days=args.min_days)))
+    print()
+    print(
+        f"--- only rows with confidence >= {cfg.weather.min_confidence} "
+        "(what Phase 4 would quote) ---"
+    )
+    print(
+        format_report(
+            build_report(rows, min_days=args.min_days, min_conf=cfg.weather.min_confidence)
+        )
+    )
+    if args.csv:
+        write_csv(rows, Path(args.csv))
+        print(f"wrote {len(rows)} joined rows to {args.csv}")
+    return 0
+
+
 def _report_clock(chk: Any, settings: Settings) -> int:
     if chk is None:
         print("clock: exchange sent no Date header; drift unknown")
@@ -234,6 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
     ob.add_argument("--depth", type=int)
     rn = sub.add_parser("run", help="Phase 2: live books + ledger + safety (no orders)")
     rn.add_argument("--max-seconds", type=float, default=None)
+    cal = sub.add_parser("calibrate", help="Phase 3 calibration report (run after 3+ days)")
+    cal.add_argument("--db", type=Path, default=None, help="ledger.db (default: data_dir)")
+    cal.add_argument("--min-days", type=int, default=3)
+    cal.add_argument("--csv", type=Path, default=None, help="also write the joined rows")
     fv = sub.add_parser("fair", help="Phase 3 shadow: weather fair value vs Kalshi (no orders)")
     fv.add_argument("--no-settlement-check", action="store_true")
     sub.add_parser("clock")
