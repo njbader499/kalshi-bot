@@ -3,7 +3,7 @@
 Current state of the Kalshi maker bot, for whoever picks this up next (human or Claude).
 Spec: `KALSHI_MAKER_BOT_PROMPT.md`. Every decision and doc conflict: `DECISIONS.md`.
 
-_Last updated: 2026-11-04 (Phases 4-5 built and tested; trading OFF; collector running)._
+_Last updated: 2026-11-04 21:50Z (DEMO trading ON; Telegram live; kill switch verified)._
 
 ## Where things stand
 
@@ -13,8 +13,8 @@ _Last updated: 2026-11-04 (Phases 4-5 built and tested; trading OFF; collector r
 | 1b Windows port, V2 orders, laptop safety | done; **demo order round-trip passes** (place → amend expiry → cancel) |
 | 2 WS books + reconciliation + ledger | done, **approved by owner 2026-11-04** |
 | 3 Weather fair value (shadow mode) | done, approved 2026-11-04. **Shadow collector running** since 2026-11-04 20:46Z |
-| 4 Risk + order manager + tilt | built and fully tested; **trading_enabled: false**, so `run` only does dry rehearsals (ledger `order_actions`, dry_run=1) |
-| 5 Telegram + watchdog + kill switch | built and tested with mocks; Telegram off until token/chat id are set |
+| 4 Risk + order manager + tilt | **LIVE ON DEMO since 2026-11-04 21:35Z** (owner's decision; local config.yaml `trading_enabled: true`; example config stays false) |
+| 5 Telegram + watchdog + kill switch | **live**: @nolankalshi_bot, chat id in .env; /status and /kill verified by the owner; KILL file verified |
 | 6+ | not started (A-S market making next per spec) |
 
 Environment: owner's Windows 11 laptop in Prague (Kalshi reachable directly; never add
@@ -47,6 +47,31 @@ to start otherwise. Never print or log key contents.
 - Settlement source must come from the API rules text, never memory. Stop and ask if it's
   ambiguous.
 - Commit and push after each milestone; stop for review at the end of each phase.
+
+## Current live state (2026-11-04 21:50Z)
+
+- The bot runs **live on DEMO** under the supervisor, pinned to `a8a327e`.
+  `ENV=demo`, `LOCATION_OK=false`, `I_ACCEPT_REAL_MONEY_RISK=false`; the prod gate is
+  untouched. Tilt only, 1 contract per quote, max 3 markets, risk limits as configured.
+- First demo orders 21:36Z; first fill: KXHIGHMIA-26NOV05-B88.5, 1 NO @ 0.89 (maker, no
+  fee). Balance $499.11.
+- Kill switch verified live: the KILL file (21:36Z) and Telegram /kill (21:44Z) both left 0
+  bot orders on the exchange. After /kill: `risk-reset --confirm` (local), delete KILL,
+  restart.
+- The model is still UNTUNED (calibration pending). Demo P&L is a plumbing test, not
+  evidence of edge.
+
+## Lessons from going live (2026-11-04)
+
+- WS `user_order` updates must drive the order manager (fills/expiry free a market),
+  and expiries must be refreshed: both were missing until `faed911`.
+- Telegram re-delivers an update until a later getUpdates acknowledges it. A restart after
+  /kill re-killed itself until `a8a327e` (commands older than process start are ignored).
+- Don't `tail -f` the supervisor log on Windows: it locks the file. Writes now retry and
+  fall back to `logs\collector-supervisor-fallback.log` (`5efb726`). Kill orphaned
+  tail.exe after stopping monitors.
+- Restarting: KILL → wait for "not restarting (rc=10)" → (after /kill: risk-reset
+  --confirm) → delete KILL → `start-collector.ps1 -Commit <sha>`.
 
 ## Shadow collector (running in the background)
 
