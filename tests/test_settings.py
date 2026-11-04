@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,7 +59,12 @@ def test_money_from_yaml_is_decimal(cfg_file: Path) -> None:
         (("risk", "max_resting_orders"), 100000),
         (("risk", "bankroll"), "-1"),
         (("fees", "taker_rate"), "7"),  # 100x off
-        (("rate_limits", "burst_seconds"), 0),
+        (("rate_limits", "read_burst_seconds"), 0),
+        (("rate_limits", "write_burst_seconds"), 60),
+        (("safety", "order_expiry_seconds"), 0),
+        (("safety", "expiry_refresh_seconds"), 500),  # > half of the 600 s expiry
+        (("safety", "clock_jump_seconds"), 1),
+        (("alerts", "fill_batch_minutes"), 0),
         (("hosts", "demo", "rest"), "http://insecure/trade-api/v2"),
         (("hosts", "prod", "rest"), "https://external-api.demo.kalshi.co/trade-api/v2"),
         (("exclusions", "banned_categories"), ["Sports"]),
@@ -119,7 +126,8 @@ def test_location_flag_blocks_real_orders(cfg_file: Path) -> None:
     assert "REFUSE" in startup_warning(s)
 
 
-def test_key_file_permissions(tmp_path: Path) -> None:
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits")
+def test_key_file_permissions_posix(tmp_path: Path) -> None:
     k = tmp_path / "k.pem"
     with pytest.raises(ConfigError, match="not found"):
         check_key_file(k)
@@ -129,6 +137,32 @@ def test_key_file_permissions(tmp_path: Path) -> None:
         check_key_file(k)
     os.chmod(k, 0o600)
     check_key_file(k)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_key_file_permissions_windows(tmp_path: Path) -> None:
+    k = tmp_path / "k.pem"
+    with pytest.raises(ConfigError, match="not found"):
+        check_key_file(k)
+    k.write_text("x")
+    # Fresh file in a temp dir inherits the folder's ACL -> refused, with the icacls fix.
+    with pytest.raises(ConfigError, match="icacls"):
+        check_key_file(k)
+    user = os.environ["USERNAME"]
+    subprocess.run(
+        ["icacls", str(k), "/inheritance:r", "/grant:r", f"{user}:(R)"],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    try:
+        check_key_file(k)
+        # Adding anyone else (here: the built-in Users group, by SID) is refused again.
+        subprocess.run(
+            ["icacls", str(k), "/grant", "*S-1-5-32-545:(R)"], check=True, capture_output=True
+        )
+        with pytest.raises(ConfigError, match="another account"):
+            check_key_file(k)
+    finally:  # give ourselves full control back so pytest can clean up tmp_path
+        subprocess.run(["icacls", str(k), "/reset"], capture_output=True)
 
 
 def test_secrets_never_print() -> None:

@@ -19,39 +19,67 @@ A maker-only (post-only limit orders, never crosses the spread) trading bot for 
 
 | Phase | Scope | State |
 |---|---|---|
-| 1 | Skeleton, settings validation, auth, read-only REST, tests | **done, offline**. Live demo smoke test still pending |
+| 1 | Skeleton, settings validation, auth, read-only REST, tests | done; docs re-verified live 2026-11-04. Demo smoke test waits on the Key ID |
+| 1b | Windows port, V2 order endpoints, laptop-safety layer | done (offline tests); live demo order test waits on the Key ID |
 | 2 | WS book + reconciliation + ledger | not started |
 | 3 | Weather fair value (shadow mode) | not started |
 | 4–10 | see the spec | not started |
 
-## Setup (local)
+## Setup (Windows, PowerShell)
 
-```bash
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install -r requirements-dev.txt
-cp config/config.example.yaml config/config.yaml
-cp .env.example .env            # fill in your DEMO key id + key path yourself
-chmod 600 keys/kalshi_demo.pem  # the bot refuses looser permissions
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
-## Phase 1 commands
+This creates `.venv`, installs the pinned dependencies, copies `config\config.yaml` and
+`.env` (it never overwrites them), and locks `%USERPROFILE%\.kalshi\demo_key.pem` to your
+user only:
 
-```bash
-python -m kalshi_maker check-config        # validate config/config.yaml and print limits
-python -m kalshi_maker status              # exchange status (public)
-python -m kalshi_maker markets --series KXHIGHNY --max 10
-python -m kalshi_maker orderbook <TICKER>
-python -m kalshi_maker balance             # needs demo key
-python -m kalshi_maker smoke               # all of the above, for Phase 1 sign-off
+```powershell
+icacls "$HOME\.kalshi\demo_key.pem" /inheritance:r /grant:r "$($env:USERNAME):(R)"
+```
+
+The bot refuses to start if any other account (including SYSTEM or Administrators) has an
+entry on the key file, or if the file inherits permissions from its folder. Then put your
+demo **Key ID** in `.env` yourself.
+
+On Linux/macOS the equivalent is `chmod 600` on the key; the same check enforces it.
+
+## Commands
+
+```powershell
+.\.venv\Scripts\python.exe -m kalshi_maker check-config     # validate config\config.yaml
+.\.venv\Scripts\python.exe -m kalshi_maker status           # exchange status (public)
+.\.venv\Scripts\python.exe -m kalshi_maker clock            # clock drift vs exchange (warns > 1 s)
+.\.venv\Scripts\python.exe -m kalshi_maker markets --series KXHIGHNY --max 10
+.\.venv\Scripts\python.exe -m kalshi_maker orderbook <TICKER>
+.\.venv\Scripts\python.exe -m kalshi_maker balance          # needs the demo key
+.\.venv\Scripts\python.exe -m kalshi_maker smoke            # all of the above + tier/costs
+.\.venv\Scripts\python.exe -m kalshi_maker cancel-bot-orders  # cancels ONLY bot orders
+.\.venv\Scripts\python.exe -m kalshi_maker upgrade-tier     # asks first; never automatic
 ```
 
 ## Tests
 
-```bash
-pytest -q                                   # offline unit tests
-KALSHI_INTEGRATION=1 pytest -m integration  # live demo, read-only
-ruff check . && mypy kalshi_maker
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1               # ruff + mypy + unit tests
+powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1 -Integration  # + live DEMO tests
 ```
+
+The integration tests place one post-only, 1-contract YES bid at the lowest tick of a demo
+weather market, amend its expiry, cancel it and confirm it's gone.
+
+## Running on a laptop
+
+- While the bot runs it holds `SetThreadExecutionState`, so Windows won't idle-sleep. Closing
+  the lid or choosing Sleep still suspends the machine.
+- Every resting order carries an exchange-side expiry (10 min by default). The bot pushes it
+  forward while it's alive, so if the laptop dies or sleeps, its quotes die too.
+- After a sleep/wake, a Wi-Fi drop, or a clock jump over 30 s, the bot stops quoting. Once it
+  can reach Kalshi again, it cancels every bot order, re-snapshots books and reconciles before
+  quoting again. Your manual orders are never touched.
+- Keep Windows Time running (`Get-Service W32Time`). The bot warns if your clock is more than
+  1 s off the exchange's.
 
 ## Prod gate
 

@@ -158,13 +158,14 @@ def test_balance_parse_prefers_dollars() -> None:
     assert Balance.parse({"balance": 50012, "balance_dollars": "500.1234"}).balance == D("500.1234")
     assert Balance.parse({"balance": 50012}).balance == D("500.12")
     assert Balance.parse({"balance": 1, "portfolio_value": 2500}).portfolio_value == D(25)
+    assert Balance.parse({"balance_dollars": "1.00"}).portfolio_value is None
     with pytest.raises(ValueError):
         Balance.parse({})
 
 
 def test_token_bucket_math() -> None:
     t = [0.0]
-    b = TokenBucket(100, 1, clock=lambda: t[0])
+    b = TokenBucket(100, 100, clock=lambda: t[0])
     assert b.try_take(60) == 0
     wait = b.try_take(60)
     assert wait == pytest.approx(0.2)

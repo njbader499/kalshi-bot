@@ -1,17 +1,15 @@
 """Request signing for Kalshi.
 
-Verified (docs.kalshi.com/getting_started/api_keys + quick_start_authenticated_requests,
-via search summary 2026-11-04):
+Verified by reading docs.kalshi.com/getting_started/api_keys directly (2026-11-04):
   * headers KALSHI-ACCESS-KEY, KALSHI-ACCESS-TIMESTAMP (milliseconds), KALSHI-ACCESS-SIGNATURE
   * message = timestamp + HTTP METHOD + path, path starting with /trade-api/v2
-  * RSA-PSS, MGF1(SHA-256), salt length = digest length, base64 signature
+  * the path is signed WITHOUT the query string ("strip the ? and everything after it")
+  * two key types: Ed25519 (recommended, the default in Kalshi's UI) signs the message
+    directly; RSA (2048-bit) uses RSA-PSS, MGF1(SHA-256), salt length = digest length.
+    Kalshi picks the algorithm from the registered public key.
+  * the PEM header does NOT identify the type (PKCS#8 RSA also says "BEGIN PRIVATE KEY"),
+    so the type is detected from the parsed key object.
   * WebSocket handshake signs GET + /trade-api/ws/v2
-
-UNVERIFIED (see DECISIONS.md):
-  * query string excluded from the signed path (community sources say so; the official
-    quickstart's example path has no query). We strip it.
-  * Ed25519 keys. Official docs describe RSA keys; a third-party guide says Ed25519.
-    Supported here so either key type loads, but only RSA-PSS is confirmed.
 """
 
 from __future__ import annotations

@@ -7,7 +7,6 @@ Money is Decimal; YAML money values are strings so they never pass through float
 from __future__ import annotations
 
 import os
-import stat
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -16,6 +15,8 @@ from typing import Any, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .keyperms import KeyPermissionError, check_key_permissions
 
 PROD_CONFIRM_PHRASE = "I ACCEPT REAL MONEY RISK"
 
@@ -113,10 +114,24 @@ class RiskLimits(_Strict):
 
 
 class RateLimits(_Strict):
+    """Token buckets per docs.kalshi.com/getting_started/rate_limits (verified 2026-11-04).
+
+    Basic tier: read 200 tokens/s with 3 s of burst capacity; write 100 tokens/s with
+    1 s capacity (Basic write buckets do not bank idle time). GET /portfolio/balance has
+    its own bucket: 1 call/s on Basic and Advanced, no burst. Default cost is 10 tokens;
+    non-default costs come from GET /account/endpoint_costs (public) at startup, and the
+    values in `endpoint_costs` here are the offline fallback. Keys are "METHOD /path"
+    relative to /trade-api/v2, with ":param" placeholders, e.g.
+    "DELETE /portfolio/events/orders/:order_id".
+    """
+
     read_tokens_per_sec: int = Field(ge=1, le=100000)
     write_tokens_per_sec: int = Field(ge=1, le=100000)
     default_cost: int = Field(ge=1, le=1000)
-    burst_seconds: float = Field(gt=0, le=5)
+    read_burst_seconds: float = Field(gt=0, le=5)
+    write_burst_seconds: float = Field(gt=0, le=5)
+    balance_calls_per_sec: float = Field(gt=0, le=10)
+    refresh_costs_from_api: bool = True
     endpoint_costs: dict[str, int] = Field(default_factory=dict)
     max_retries: int = Field(ge=0, le=10)
     backoff_base_seconds: float = Field(gt=0, le=10)
@@ -151,6 +166,34 @@ class Exclusions(_Strict):
         return v
 
 
+class Safety(_Strict):
+    """Laptop safety (sleep/wake, network drops, clock jumps) and order expiry."""
+
+    order_expiry_seconds: int = Field(ge=60, le=3600)
+    expiry_refresh_seconds: int = Field(ge=30, le=3000)
+    clock_jump_seconds: float = Field(ge=5, le=600)
+    loop_stall_seconds: float = Field(ge=5, le=600)
+    clock_drift_warn_seconds: float = Field(gt=0, le=30)
+    prevent_sleep: bool = True
+    cancel_order_on_pause: bool = True
+
+    @model_validator(mode="after")
+    def _refresh_before_expiry(self) -> Self:
+        if self.expiry_refresh_seconds * 2 > self.order_expiry_seconds:
+            raise ValueError(
+                "expiry_refresh_seconds must be at most half of order_expiry_seconds, so a "
+                "missed refresh doesn't let live quotes expire mid-session"
+            )
+        return self
+
+
+class Alerts(_Strict):
+    """Telegram alert policy (Phase 5). Fills are batched; risk/kill/error are instant."""
+
+    fill_batch_minutes: int = Field(ge=1, le=1440)
+    instant_kinds: list[str] = Field(default_factory=lambda: ["risk", "kill", "error"])
+
+
 class Paths(_Strict):
     data_dir: Path
     log_dir: Path
@@ -169,6 +212,8 @@ class AppConfig(_Strict):
     rate_limits: RateLimits
     fees: Fees
     exclusions: Exclusions
+    safety: Safety
+    alerts: Alerts
     paths: Paths
     logging: LoggingCfg
 
@@ -222,16 +267,14 @@ def load_config(path: Path) -> AppConfig:
 
 
 def check_key_file(path: Path) -> None:
-    """Private key must exist, be a regular file, and be chmod 600 (or stricter)."""
-    if not path.exists():
-        raise ConfigError(f"private key file not found: {path}")
-    st = path.stat()
-    if not stat.S_ISREG(st.st_mode):
-        raise ConfigError(f"private key path is not a regular file: {path}")
-    if st.st_mode & 0o077:
-        raise ConfigError(
-            f"private key {path} has permissions {oct(st.st_mode & 0o777)}; run: chmod 600 {path}"
-        )
+    """Private key must exist, be a regular file and be owner-only.
+
+    Windows: DACL grants only the current user (see keyperms.py). POSIX: chmod 600.
+    """
+    try:
+        check_key_permissions(path)
+    except KeyPermissionError as e:
+        raise ConfigError(str(e)) from e
 
 
 def check_prod_gate(

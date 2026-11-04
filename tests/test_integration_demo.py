@@ -1,17 +1,27 @@
-"""Opt-in live checks against the Kalshi DEMO API (read-only in Phase 1).
+"""Opt-in live checks against the Kalshi DEMO API.
 
-Run:  KALSHI_INTEGRATION=1 pytest -m integration
-Needs config/config.yaml and .env with demo credentials. Never runs against prod.
+Run (PowerShell):
+    $env:KALSHI_INTEGRATION = "1"; .\\.venv\\Scripts\\python.exe -m pytest -m integration -v
+    Remove-Item Env:KALSHI_INTEGRATION
+
+Needs config/config.yaml and .env with demo credentials. Refuses to run against prod.
+The order test places ONE post-only YES bid of 1 contract at the market's lowest tick (far
+below the market), amends its expiry, cancels it and checks it's gone. Worst case it
+costs one cent of demo money.
 """
 
 from __future__ import annotations
 
 import os
+import time
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from kalshi_maker.cli import _signer
+from kalshi_maker.money import TickGrid
+from kalshi_maker.order_types import BookSide, OrderRequest, new_client_order_id
 from kalshi_maker.rest import KalshiREST
 from kalshi_maker.settings import Env, load_settings
 
@@ -25,24 +35,93 @@ pytestmark = [
 def settings():
     s = load_settings(Path("config/config.yaml"), Path(".env"))
     assert s.env is Env.DEMO, "integration tests only run against demo"
+    assert "demo" in s.hosts.rest
     return s
 
 
-async def test_public_read(settings) -> None:
-    async with KalshiREST(settings.hosts.rest, settings.config.rate_limits) as api:
-        assert "trading_active" in await api.exchange_status()
-        n = 0
-        async for m in api.iter_markets(status="open", limit=5):
-            ob = await api.get_orderbook(m["ticker"])
-            assert ob is not None
-            n += 1
-            if n >= 2:
-                break
-
-
-async def test_auth_balance(settings) -> None:
+@pytest.fixture
+async def api(settings):
     async with KalshiREST(
         settings.hosts.rest, settings.config.rate_limits, signer=_signer(settings)
-    ) as api:
-        bal = await api.get_balance()
-        assert bal.balance >= 0
+    ) as c:
+        yield c
+
+
+async def test_public_read(api) -> None:
+    assert "trading_active" in await api.exchange_status()
+    n = 0
+    async for m in api.iter_markets(status="open", limit=5):
+        ob = await api.get_orderbook(m["ticker"])
+        assert ob is not None
+        n += 1
+        if n >= 2:
+            break
+
+
+async def test_auth_balance_and_limits(api) -> None:
+    bal = await api.get_balance()
+    assert bal.balance >= 0
+    tier = await api.apply_account_limits()
+    assert tier
+    assert await api.refresh_endpoint_costs() > 0
+
+
+async def test_clock_within_tolerance(api, settings) -> None:
+    chk = await api.check_clock()
+    assert chk is not None
+    assert not chk.exceeds(settings.config.safety.clock_drift_warn_seconds)
+
+
+async def _far_market(api) -> tuple[str, TickGrid]:
+    """An open weather market whose best YES bid is above the lowest tick."""
+    async for m in api.iter_markets(status="open", limit=200):
+        t = m.get("ticker", "")
+        if not t.startswith(("KXHIGH", "KXLOW")):
+            continue
+        try:
+            grid = TickGrid.from_market(m)
+        except Exception:
+            continue
+        ob = await api.get_orderbook(t)
+        best_no = ob.best_no_bid
+        # YES ask = 1 - best NO bid; a bid at min_price must stay strictly below it.
+        if best_no is None or (1 - best_no) > grid.min_price:
+            return t, grid
+    pytest.skip("no open KXHIGH/KXLOW market on demo right now")
+
+
+async def test_post_only_order_lifecycle(api, settings) -> None:
+    ticker, grid = await _far_market(api)
+    exp = int(time.time()) + settings.config.safety.order_expiry_seconds
+    order = OrderRequest(
+        ticker=ticker,
+        side=BookSide.BID,
+        price=grid.min_price,
+        count=Decimal(1),
+        client_order_id=new_client_order_id(),
+        expiration_time=exp,
+    )
+    created = await api.create_order_idempotent(order, grid)
+    oid = created["order_id"]
+    try:
+        live = await api.get_order(oid)
+        assert live["client_order_id"] == order.client_order_id
+        assert live["status"] == "resting"
+        # expiry-only amend: same price + total count, later expiration
+        await api.amend_order(
+            oid,
+            ticker=ticker,
+            side="bid",
+            price=order.price,
+            count=order.count,
+            expiration_time=exp + 120,
+        )
+        live = await api.get_order(oid)
+        assert live["status"] == "resting"
+    finally:
+        await api.cancel_order(oid, ticker)
+    # reconcile: it must no longer be resting
+    after = await api.get_order(oid)
+    assert after["status"] == "canceled"
+    resting = [o async for o in api.iter_orders(ticker=ticker, status="resting")]
+    assert oid not in {o["order_id"] for o in resting}

@@ -6,7 +6,10 @@ python -m kalshi_maker balance
 python -m kalshi_maker markets [--series KXHIGHNY] [--status open] [--max 20]
 python -m kalshi_maker market TICKER
 python -m kalshi_maker orderbook TICKER [--depth 10]
+python -m kalshi_maker clock          # local clock vs exchange (warns if drift > 1 s)
 python -m kalshi_maker smoke          # all of the above in one go, for Phase 1 sign-off
+python -m kalshi_maker cancel-bot-orders   # cancel resting orders with the bot prefix only
+python -m kalshi_maker upgrade-tier   # request the Advanced API tier (asks first)
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from typing import Any
 import httpx
 
 from .auth import Signer
+from .continuity import describe_clock_offset
 from .logging_setup import setup_logging
 from .money import TickGrid
 from .rest import KalshiAPIError, KalshiREST, market_quote_summary
@@ -57,10 +61,34 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
         print(_dump(settings.config.risk.model_dump()))
         return 0
 
-    needs_auth = cmd in {"balance", "smoke"}
+    needs_auth = cmd in {"balance", "smoke", "cancel-bot-orders", "upgrade-tier"}
     async with _client(settings, needs_auth) as api:
         if cmd in {"status", "smoke"}:
             print("exchange status:", _dump(await api.exchange_status()))
+        if cmd in {"clock", "smoke"}:
+            rc = _report_clock(await api.check_clock(), settings)
+            if cmd == "clock":
+                return rc
+        if cmd == "smoke":
+            n = await api.refresh_endpoint_costs()
+            print(f"endpoint costs: default={api.costs.default_cost}, {n} non-default loaded")
+            tier = await api.apply_account_limits()
+            print(
+                f"api tier: {tier}  read {api.read_bucket.rate:g}/s"
+                f" cap {api.read_bucket.capacity:g}  write {api.write_bucket.rate:g}/s"
+                f" cap {api.write_bucket.capacity:g}"
+            )
+        if cmd == "cancel-bot-orders":
+            res = await api.cancel_all_bot_orders()
+            print(f"cancelled {len(res)} bot order(s); manual orders untouched")
+            return 0
+        if cmd == "upgrade-tier":
+            ans = input("Request the permanent Advanced API tier from Kalshi? Type 'yes': ")
+            if ans.strip().lower() != "yes":
+                print("not requested")
+                return 1
+            print(_dump(await api.upgrade_api_usage_level()))
+            return 0
         if cmd in {"balance", "smoke"}:
             bal = await api.get_balance()
             print(f"balance: ${bal.balance}  portfolio_value: {bal.portfolio_value}")
@@ -103,6 +131,22 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _report_clock(chk: Any, settings: Settings) -> int:
+    if chk is None:
+        print("clock: exchange sent no Date header; drift unknown")
+        return 0
+    thr = settings.config.safety.clock_drift_warn_seconds
+    print(
+        f"clock: exchange - local in [{chk.lower:+.2f}s, {chk.upper:+.2f}s] "
+        f"(Date header has 1 s resolution)"
+    )
+    warn = describe_clock_offset(chk.lower, chk.upper, thr)
+    if warn:
+        print(f"WARNING: {warn}. Resync Windows time: w32tm /resync  (admin PowerShell)")
+        return 3
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kalshi_maker")
     p.add_argument("--config", type=Path, default=Path("config/config.yaml"))
@@ -120,8 +164,14 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("orderbook")
     ob.add_argument("ticker")
     ob.add_argument("--depth", type=int)
+    sub.add_parser("clock")
+    sub.add_parser("cancel-bot-orders")
+    sub.add_parser("upgrade-tier")
     sm = sub.add_parser("smoke")
     sm.add_argument("--max", type=int, default=5)
+    # Default to an allowed weather series: the unfiltered market list is dominated by
+    # multivariate (KXMV*) combos, which are banned and 404 on single-market lookup.
+    sm.add_argument("--series", default="KXHIGHNY")
     return p
 
 

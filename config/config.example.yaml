@@ -3,7 +3,8 @@
 # Every value is validated at load. The bot refuses to start if anything is absurd.
 
 # Hosts are configurable because Kalshi has moved them before.
-# Source: docs.kalshi.com/getting_started/api_environments (checked 2026-11-04 via search summary).
+# Source: docs.kalshi.com/getting_started/api_environments (read directly 2026-11-04).
+# Kalshi also offers warp-ws hosts that serve ONLY the fill/user_orders channels; not used yet.
 hosts:
   demo:
     rest: "https://external-api.demo.kalshi.co/trade-api/v2"
@@ -31,15 +32,27 @@ risk:
   stale_data_seconds: 30
   allow_taker_flatten: false
 
-# Rate limiter. Basic tier per the docs: 200 read / 100 write tokens per second,
-# most requests cost 10 tokens. Per-endpoint overrides go in endpoint_costs.
-# At startup the bot can read GET /account/endpoint_costs (UNVERIFIED path) to refine this.
+# Rate limiter. Verified against docs.kalshi.com/getting_started/rate_limits (2026-11-04).
+# Basic tier: read 200 tokens/s, bucket holds 3 s; write 100 tokens/s, bucket holds 1 s.
+# Default cost 10 tokens. Balance has its own bucket (1 call/s, no burst).
+# 429 responses carry no Retry-After header, so the client backs off exponentially.
+# Non-default costs are fetched from GET /account/endpoint_costs at startup; the list
+# below is the offline fallback (copied from that endpoint on 2026-11-04).
+# Batch endpoints bill per item, so they save requests, not tokens.
 rate_limits:
   read_tokens_per_sec: 200
   write_tokens_per_sec: 100
   default_cost: 10
-  burst_seconds: 1
-  endpoint_costs: {}
+  read_burst_seconds: 3
+  write_burst_seconds: 1
+  balance_calls_per_sec: 1
+  refresh_costs_from_api: true
+  endpoint_costs:
+    "DELETE /portfolio/events/orders": 2
+    "DELETE /portfolio/events/orders/:order_id": 2
+    "DELETE /portfolio/events/orders/batched": 2
+    "GET /portfolio/orders/:order_id": 2
+    "POST /account/api_usage_level/upgrade": 30
   max_retries: 5
   backoff_base_seconds: 0.5
   backoff_max_seconds: 30
@@ -56,6 +69,26 @@ exclusions:
   banned_categories: ["Sports", "Politics", "Elections", "Entertainment", "Mentions", "Media"]
   banned_ticker_patterns: ["^KXMV", "MULTIGAME", "PARLAY"]
   min_time_to_close_minutes: 60
+
+# Laptop safety. Every resting order carries an exchange-side expiration so quotes die on
+# their own if the bot, laptop or Wi-Fi does. While the bot is alive it pushes the expiry
+# forward with an expiry-only amend, which keeps queue position.
+# A sleep/wake, a network drop, or a wall-clock jump larger than clock_jump_seconds makes the
+# bot stop quoting, cancel all of its own orders once it's reconnected, re-snapshot books
+# and reconcile with the exchange before it resumes.
+safety:
+  order_expiry_seconds: 600
+  expiry_refresh_seconds: 240
+  clock_jump_seconds: 30
+  loop_stall_seconds: 15
+  clock_drift_warn_seconds: 1
+  prevent_sleep: true          # Windows SetThreadExecutionState while the bot runs
+  cancel_order_on_pause: true  # exchange cancels our orders if trading is paused
+
+# Alerts (Telegram arrives in Phase 5). Fills are batched; risk/kill/error alerts are instant.
+alerts:
+  fill_batch_minutes: 15
+  instant_kinds: ["risk", "kill", "error"]
 
 paths:
   data_dir: "./data"

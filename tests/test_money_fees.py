@@ -6,7 +6,13 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from kalshi_maker.fees import maker_fee, taker_fee, trade_fee
+from kalshi_maker.fees import (
+    fill_fee_upper_bound,
+    maker_fee,
+    maker_rate,
+    taker_fee,
+    trade_fee,
+)
 from kalshi_maker.money import MoneyError, TickGrid, to_decimal
 
 PENNY = {"price_ranges": [{"start": "0.0000", "end": "1.0000", "step": "0.0100"}]}
@@ -85,24 +91,47 @@ def test_rounding_properties(p: D, mkt: dict) -> None:
 @pytest.mark.parametrize(
     "n,p,fee",
     [
-        ("1", "0.50", "0.02"),  # 0.0175 -> ceil 0.02
-        ("100", "0.50", "1.75"),  # exact, no rounding
-        ("1", "0.01", "0.01"),  # 0.000693 -> 0.01
-        ("10", "0.99", "0.01"),  # 0.00693 -> 0.01
-        ("3", "0.37", "0.05"),  # 0.048951 -> 0.05
-        ("0", "0.50", "0.00"),
-        ("1", "0", "0.00"),
-        ("1", "1", "0.00"),
-        ("2.5", "0.40", "0.05"),  # fractional contracts: 0.042 -> 0.05
+        ("1", "0.50", "0.017500"),  # exact
+        ("100", "0.50", "1.750000"),
+        ("1", "0.055", "0.003639"),  # docs worked example: 0.00363825 -> ceil 6dp
+        ("1", "0.01", "0.000693"),
+        ("3", "0.37", "0.048951"),
+        ("1", "0.333", "0.015548"),  # 0.0155477... -> ceil
+        ("0", "0.50", "0"),
+        ("1", "0", "0"),
+        ("1", "1", "0"),
+        ("2.5", "0.40", "0.042000"),  # fractional contracts
     ],
 )
 def test_taker_fee(n: str, p: str, fee: str) -> None:
     assert taker_fee(D(n), D(p)) == D(fee)
 
 
+def test_docs_rounding_example_fcm_cent_precision() -> None:
+    # docs fee_rounding worked example: buy, revenue -0.055, model fee 0.00363825, 1c precision
+    total = fill_fee_upper_bound(D("0.07"), D(1), D("0.055"), buy=True, balance_precision=D("0.01"))
+    assert total == D("0.003639") + D("0.001361")
+
+
+def test_direct_member_rounding_is_small() -> None:
+    f = fill_fee_upper_bound(D("0.07"), D(1), D("0.055"))
+    assert D("0.003639") <= f < D("0.003639") + D("0.0001")
+
+
+def test_maker_rate_by_fee_type() -> None:
+    t = D("0.07")
+    assert maker_rate("quadratic", D(1), t) == 0
+    assert maker_rate("quadratic_with_maker_fees", D(1), t) == D("0.0175")
+    assert maker_rate("quadratic_with_combo_maker_fees", D(2), t) == D("0.07")
+    with pytest.raises(MoneyError):
+        maker_rate("flat", D(1), t)
+    with pytest.raises(MoneyError):
+        maker_rate(None, D(1), t)
+
+
 def test_maker_fee_default_zero_and_nonzero() -> None:
-    assert maker_fee(D(100), D("0.5"), D(0)) == D("0.00")
-    assert maker_fee(D(100), D("0.5"), D("0.0175")) == D("0.44")  # 0.4375 -> 0.44
+    assert maker_fee(D(100), D("0.5"), D(0)) == 0
+    assert maker_fee(D(100), D("0.5"), D("0.0175")) == D("0.4375")
 
 
 def test_fee_guards() -> None:
@@ -115,4 +144,4 @@ def test_fee_guards() -> None:
 def test_fee_is_ceiling(n: int, p: D) -> None:
     exact = D("0.07") * n * p * (1 - p)
     f = taker_fee(D(n), p)
-    assert f >= exact and f - exact < D("0.01") and f == f.quantize(D("0.01"))
+    assert f >= exact and f - exact < D("0.000001") and f == f.quantize(D("0.000001"))
