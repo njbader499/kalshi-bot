@@ -23,8 +23,16 @@ Set-Location $Root
 $failures = 0
 
 function Write-Sup([string]$msg) {
+    # Another process (e.g. a log tailer) can hold the file open on Windows; retry, then
+    # fall back to a second file so a supervisor decision is never silently unlogged.
     $line = "{0}  [supervisor] {1}" -f (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ssZ"), $msg
-    Add-Content -Path (Join-Path $LogDir "collector-supervisor.log") -Value $line
+    foreach ($i in 1..10) {
+        try {
+            Add-Content -Path (Join-Path $LogDir "collector-supervisor.log") -Value $line -ErrorAction Stop
+            return
+        } catch { Start-Sleep -Milliseconds 300 }
+    }
+    try { Add-Content -Path (Join-Path $LogDir "collector-supervisor-fallback.log") -Value $line -ErrorAction Stop } catch { }
 }
 
 Write-Sup "starting (pid $PID) root=$Root config=$Config"
