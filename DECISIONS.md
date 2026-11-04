@@ -449,6 +449,35 @@ station bias the planned per-station bias correction targets.
   That's exactly why trading stays off until the calibration report says the model is
   trustworthy.
 
+## Phase 5 decisions (2026-11-04): Telegram, watchdog, kill switch
+
+- **Telegram over raw httpx** (Bot API `sendMessage` / `getUpdates` long-poll), so no
+  python-telegram-bot dependency. Configure `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` in
+  `.env`; when either is empty, alerts are off and the bot runs normally.
+  api.telegram.org reachability from this laptop is not yet tested live.
+- **Alert policy (owner):** risk / kill / error are instant; fills, WS resyncs and other
+  info go into a digest every 15 min. Startup/shutdown and command replies are always
+  instant. The queue is bounded and drops the oldest. Send failures are counted and
+  retried, never raised. Telegram I/O runs on its own tasks so it can't stall the loop.
+- **Token never logged.** httpx logs request URLs at INFO, and Telegram URLs contain the
+  token. A test caught it leaking into captured logs. Fixed at the source (a filter on the
+  `httpx`/`httpcore` loggers) and again in the JSON formatter; error texts are reduced to
+  the exception type and HTTP status.
+- **Commands** (whitelisted chat only; others are silently ignored): `/status /positions
+  /orders /limits` read-only; `/pause` and `/kill` immediate; `/resume` and `/mode … tilt`
+  need `/confirm <code>` (6 hex chars, 120 s, one use). Not exposed at all: enabling
+  trading, raising limits, clearing a KILL, taker flatten. `/mode … mm` replies "Phase 6".
+- **Watchdog**: a separate OS thread with its own sync HTTP client and signer. If the main
+  loop's heartbeat is older than 60 s it cancels bot orders once per stall (by
+  client_order_id prefix, batches of 50, never the exchange cancel-all) and alerts. It
+  re-arms when heartbeats resume. In dry mode its cancel is a no-op. Exchange-side expiry
+  remains the backstop.
+- **Kill switch**: Telegram `/kill`, a `KILL` file, or SIGTERM (plus SIGBREAK on Windows)
+  all converge. The KILL file is written, the loop cancels everything and exits 10 (the
+  supervisor won't restart), and in live mode the RiskManager is KILLED and persisted, so
+  deleting the file isn't enough: `risk-reset --confirm` is needed. Ctrl+C is a graceful
+  stop that still cancels bot orders.
+
 ## Design choices (Phase 1)
 
 - **Layout.** The repo root is the spec's `kalshi_maker/` directory, and the spec's `bot/`

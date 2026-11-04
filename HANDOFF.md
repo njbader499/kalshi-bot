@@ -3,7 +3,7 @@
 Current state of the Kalshi maker bot, for whoever picks this up next (human or Claude).
 Spec: `KALSHI_MAKER_BOT_PROMPT.md`. Every decision and doc conflict: `DECISIONS.md`.
 
-_Last updated: 2026-11-04 (shadow collector running; calibration report built)._
+_Last updated: 2026-11-04 (Phases 4-5 built and tested; trading OFF; collector running)._
 
 ## Where things stand
 
@@ -14,7 +14,8 @@ _Last updated: 2026-11-04 (shadow collector running; calibration report built)._
 | 2 WS books + reconciliation + ledger | done, **approved by owner 2026-11-04** |
 | 3 Weather fair value (shadow mode) | done, approved 2026-11-04. **Shadow collector running** since 2026-11-04 20:46Z |
 | 4 Risk + order manager + tilt | built and fully tested; **trading_enabled: false**, so `run` only does dry rehearsals (ledger `order_actions`, dry_run=1) |
-| 5+ | see below |
+| 5 Telegram + watchdog + kill switch | built and tested with mocks; Telegram off until token/chat id are set |
+| 6+ | not started (A-S market making next per spec) |
 
 Environment: owner's Windows 11 laptop in Prague (Kalshi reachable directly; never add
 VPN/proxy/geolocation workarounds). `ENV=demo`, `LOCATION_OK=false`. Demo account
@@ -54,7 +55,10 @@ supervisor that restarts it on crashes (backoff 10 s → 5 min). It logs fair va
 prices every 10 min and checks settlements hourly.
 
 - Code runs from a **git worktree pinned to a commit**: `C:\Users\njbad\kalshi-bot-collector`
-  (currently `57eb7cd`). Editing this repo never affects it until it's re-pinned.
+  (currently `57eb7cd`, Phase 3 code: shadow logging only). Editing this repo never affects
+  it until it's re-pinned. Re-pinning to a later commit would also log dry-run order
+  rehearsals; that's optional and the owner's call (stop it with KILL, delete KILL, then
+  run start-collector.ps1 -Commit <sha>).
 - Config: `config\collector.yaml` (git-ignored, generated from `config\config.yaml`, with
   absolute paths). Ledger `data\ledger.db`, logs `logs\collector-YYYYMMDD.log` and
   `logs\collector-supervisor.log`, KILL file `KILL` in this repo root.
@@ -104,6 +108,23 @@ the model beat the market), reliability by city, and per-station bias with a sug
    gates). Restart `run`. On startup it prints "LIVE ORDER PLACEMENT ENABLED".
 4. `risk-status` shows halts; `risk-reset --confirm` clears a KILL (local only, never via
    Telegram).
+
+## Telegram setup (owner)
+
+1. Create a bot with @BotFather and copy the token. Send your bot any message, then read
+   your chat id from `https://api.telegram.org/bot<token>/getUpdates` in a browser.
+2. Put both in `.env`: `TELEGRAM_TOKEN=...`, `TELEGRAM_CHAT_ID=...` (never in chat).
+3. Restart `run`. Startup prints "telegram: alerts + commands on". Try `/status`.
+   Commands: `/status /positions /orders /limits /pause /resume /kill /mode`; risk-
+   increasing ones ask for `/confirm <code>`.
+
+## Kill switch / watchdog (Phase 5)
+
+- Kill: `/kill` in Telegram, `New-Item KILL` in the repo root, or SIGTERM. All bot orders
+  are cancelled, the process exits with code 10 and isn't restarted. In live mode it also
+  needs `risk-reset --confirm`.
+- Watchdog: if the main loop stalls > 60 s, a separate thread cancels bot orders (live
+  mode) and alerts.
 
 ## Open items for the owner
 

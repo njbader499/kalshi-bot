@@ -15,6 +15,7 @@ _REDACT_KEYS = re.compile(r"(signature|private|secret|token|key_id|access-key|pa
 _REDACT_INLINE = re.compile(
     r"(KALSHI-ACCESS-(?:SIGNATURE|KEY)['\"]?\s*[:=]\s*['\"]?)[^'\",\s}]+", re.I
 )
+_TG_TOKEN = re.compile(r"bot\d+:[A-Za-z0-9_-]+")  # Telegram bot token inside URLs
 
 
 def _redact(key: str, value: object) -> object:
@@ -31,7 +32,9 @@ class JsonFormatter(logging.Formatter):
             "ts": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "msg": _REDACT_INLINE.sub(r"\1<redacted>", record.getMessage()),
+            "msg": _TG_TOKEN.sub(
+                "bot<redacted>", _REDACT_INLINE.sub(r"\1<redacted>", record.getMessage())
+            ),
         }
         for k, v in record.__dict__.items():
             if k not in _STD_ATTRS and not k.startswith("_"):

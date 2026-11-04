@@ -87,6 +87,9 @@ class TradingLoop:
         self.grids: dict[str, TickGrid] = {}
         self.fairs: dict[str, FairInput] = {}
         self.risk_events: list[str] = []
+        self.paused = False  # /pause: cancel all, quote nothing until /resume
+        self.off_markets: set[str] = set()  # /mode <ticker> off
+        self.off_categories: set[str] = set()  # /mode <category> off
 
     # ---- inputs ----
     def update_markets(self, markets: Iterable[Mapping[str, Any]], category: str) -> None:
@@ -130,6 +133,8 @@ class TradingLoop:
             grid = self.grids.get(t)
             if b is None or not b.valid or grid is None or t not in self.pf.meta:
                 continue
+            if t in self.off_markets or self.pf.meta[t].category in self.off_categories:
+                continue
             if now - f.at > t_cfg.max_fair_age_seconds:
                 continue
             v = MarketView(t, f.p, f.confidence, b.best_yes_bid, b.best_yes_ask, grid)
@@ -154,7 +159,7 @@ class TradingLoop:
             await self.om.cancel_all("risk stop: " + "; ".join(events))
             self.risk_events.extend(events)
             return events
-        can = gate_open and self.risk.can_trade().ok
+        can = gate_open and not self.paused and self.risk.can_trade().ok
         await self.om.sync(self.desired(books), self.grids, can)
         return []
 

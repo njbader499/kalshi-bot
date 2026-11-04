@@ -24,6 +24,7 @@ A maker-only (post-only limit orders, never crosses the spread) trading bot for 
 | 2 | WS book + reconciliation + ledger | done, approved |
 | 3 | Weather fair value (shadow mode) | done; shadow collector running |
 | 4 | Risk manager + order manager + tilt | built and tested; **trading_enabled: false** (dry runs only) |
+| 5 | Telegram + watchdog + kill switch | built and tested with mocks; Telegram needs your bot token |
 | 4–10 | see the spec | not started |
 
 ## Setup (Windows, PowerShell)

@@ -20,6 +20,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +35,16 @@ from .continuity import (
     describe_clock_offset,
 )
 from .instance_lock import AlreadyRunning, InstanceLock
+from .killswitch import install_signal_kill, write_kill_file
 from .ledger import Ledger
 from .markets import discover_series_markets
 from .power import keep_awake
 from .reconcile import ReconcileReport, reconcile
 from .rest import KalshiREST
 from .settings import Settings
+from .telegram import CommandRouter, Notifier, TelegramClient, poll_commands
 from .trading import TradingLoop, describe_mode
+from .watchdog import Watchdog, sync_cancel_bot_orders
 from .weather.settlement import check_settlements
 from .weather.shadow import log_rows, make_engine, shadow_rows
 from .weather.sources import WeatherSources
@@ -69,6 +73,8 @@ class Runner:
     kill_file: Path
     max_seconds: float | None = None
     prod_public: KalshiREST | None = None  # read-only real prices/settlements (Phase 3)
+    notifier: Notifier | None = None
+    telegram: TelegramClient | None = None
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     exit_code: int = 0
 
@@ -83,13 +89,98 @@ class Runner:
         self._shadow_task: asyncio.Task[None] | None = None
         self._settle_task: asyncio.Task[None] | None = None
         self._trade_task: asyncio.Task[None] | None = None
+        self._notify_task: asyncio.Task[None] | None = None
+        self._poll_task: asyncio.Task[None] | None = None
+        if self.notifier is None:  # no Telegram configured: alerts go nowhere
+            self.notifier = Notifier(None, frozenset(), 3600)
+        self.watchdog: Watchdog | None = None
         self.trading = TradingLoop(self.settings.config, self.ledger, api=self.api)
         safety = self.settings.config.safety
         self.monitor = ContinuityMonitor(safety.clock_jump_seconds, safety.loop_stall_seconds)
         self.gate = SafetyGate(
             RecoverySteps(self._reachable, self._cancel, self._resnapshot, self._reconcile),
-            on_event=lambda kind, msg: say(f"[{kind}] {msg}"),
+            on_event=lambda kind, msg: self.alert(kind, msg),
         )
+
+    def alert(self, kind: str, text: str) -> None:
+        """Operator line + Telegram (instant for risk/kill/error/lifecycle, else digest)."""
+        say(f"[{kind}] {text}")
+        if self.notifier is not None:
+            self.notifier.alert(kind, text)
+
+    # ---- BotControl (Telegram commands) ----
+    def status_text(self) -> str:
+        tl = self.trading
+        books = self.ws.books if self.ws else {}
+        eq = tl.equity_proxy(books)
+        rs = tl.risk.state
+        day_pnl = eq - Decimal(rs.day_start) if rs.day_key else Decimal(0)
+        cats: dict[str, Decimal] = {}
+        for t in tl.pf._all_tickers():
+            c = tl.pf.meta[t].category if t in tl.pf.meta else "?"
+            cats[c] = cats.get(c, Decimal(0)) + tl.pf.market_exposure(t)
+        lines = [
+            describe_mode(self.settings.config),
+            f"gate: {self.gate.state.value}  paused: {tl.paused}  "
+            f"risk: {tl.risk.can_trade().reason or 'ok'}",
+            f"equity proxy: {eq:.2f}  P&L today: {day_pnl:+.2f}",
+            f"exposure by category: {', '.join(f'{k} {v:.2f}' for k, v in cats.items()) or 'none'}",
+            f"markets quoted: {', '.join(sorted(tl.pf.quoted_markets())) or 'none'}",
+            self._status_line() if self.ws else "websocket not started",
+        ]
+        return "\n".join(lines)
+
+    def positions_text(self) -> str:
+        ps = [p for p in self.trading.pf.positions.values() if p.qty != 0]
+        if not ps:
+            return "no open positions"
+        return "\n".join(f"{p.ticker}: {p.qty:+} (cost {p.cost:.2f})" for p in ps)
+
+    def orders_text(self) -> str:
+        os_ = list(self.trading.pf.resting.values())
+        tag = " (DRY)" if not self.trading.live else ""
+        if not os_:
+            return "no resting bot orders" + tag
+        return "\n".join(f"{o.ticker} {o.side} {o.remaining} @ {o.price}{tag}" for o in os_)
+
+    def limits_text(self) -> str:
+        L = self.settings.config.risk
+        return "\n".join(f"{k}: {v}" for k, v in L.model_dump().items())
+
+    async def pause(self, reason: str) -> str:
+        self.trading.paused = True
+        n = await self.trading.cancel_all(f"paused: {reason}")
+        self.alert("risk", f"PAUSED ({reason}); cancelled {n} order(s)")
+        return f"paused; cancelled {n} order(s). /resume to quote again."
+
+    async def resume(self) -> str:
+        self.trading.paused = False
+        msg = "resumed quoting"
+        if self.trading.live and self.trading.risk.state.weekly_halt:
+            msg += "; " + self.trading.risk.resume_weekly()
+        self.alert("risk", msg)
+        return msg
+
+    async def kill(self, reason: str) -> str:
+        write_kill_file(self.kill_file, reason)
+        if self.trading.live:
+            self.trading.risk.kill(reason)
+        n = await self.trading.cancel_all(f"KILL: {reason}")
+        self.alert("kill", f"KILL ({reason}): cancelled {n} order(s); stopping")
+        return f"KILLED: cancelled {n} order(s). Bot stops now; local restart only."
+
+    async def set_mode(self, scope: str, mode: str) -> str:
+        tl = self.trading
+        cats = {m.category.lower(): m.category for m in tl.pf.meta.values()}
+        if scope in tl.pf.meta:
+            (tl.off_markets.add if mode == "off" else tl.off_markets.discard)(scope)
+        elif scope.lower() in cats:
+            c = cats[scope.lower()]
+            (tl.off_categories.add if mode == "off" else tl.off_categories.discard)(c)
+        else:
+            return f"unknown market or category: {scope}"
+        self.alert("risk", f"mode {scope} -> {mode}")
+        return f"{scope}: {mode}"
 
     # ---- recovery steps ----
     async def _reachable(self) -> None:
@@ -141,7 +232,7 @@ class Runner:
                 self.gate.trip(Discontinuity(Cause.NETWORK, why))
 
         def on_gap(why: str) -> None:
-            say(f"book resync: {why}")
+            self.alert("info", f"book resync: {why}")
 
         return WSCallbacks(
             on_fill=lambda m: enqueue("fill", m),
@@ -170,7 +261,7 @@ class Runner:
                     if self.trading.live:
                         self.trading.om.on_fill(m)
                     if await self.ledger.record_fill(m, source="ws"):
-                        say(f"FILL {m.get('market_ticker')} {m.get('book_side')} "
+                        self.alert("fill", f"{m.get('market_ticker')} {m.get('book_side')} "
                             f"{m.get('count_fp')} @ {m.get('yes_price_dollars')}")  # fmt: skip
                 else:
                     await self.ledger.record_order_event(m)
@@ -237,7 +328,7 @@ class Runner:
                 prod, self.weather_sources, self.settings.config.markets.weather_series
             )
             for mm in chk.mismatches:
-                say(f"SETTLEMENT MISMATCH vs NWS CLI: {mm}")
+                self.alert("error", f"SETTLEMENT MISMATCH vs NWS CLI: {mm}")
                 await self.ledger.record_error("settlement_mismatch", mm)
             say(
                 f"settlement check: {chk.agreed}/{chk.checked} agree with NWS CLI, "
@@ -253,11 +344,18 @@ class Runner:
         try:
             events = await self.trading.step(self.ws.books, self.gate.can_quote)
             for e in events:
-                say(f"RISK STOP: {e} (all bot orders cancelled)")
+                self.alert("risk", f"RISK STOP: {e} (all bot orders cancelled)")
                 await self.ledger.record_error("risk_stop", e)
         except Exception as e:
             log.exception("trading step failed")
             await self.ledger.record_error("trading_step", repr(e))
+            self.alert("error", f"trading step failed: {type(e).__name__}")
+
+    def _watchdog_cancel_fn(self) -> Any:
+        if not self.trading.live:
+            return lambda: 0  # dry mode: nothing on the exchange to cancel
+        rest_url, signer = self.settings.hosts.rest, self.signer
+        return lambda: sync_cancel_bot_orders(rest_url, signer)
 
     def _spawn(self, attr: str, coro_fn: Any) -> None:
         t = getattr(self, attr)
@@ -276,7 +374,7 @@ class Runner:
             return
         warn = describe_clock_offset(chk.lower, chk.upper, thr)
         if warn:
-            say(f"WARNING clock drift: {warn}. Run 'w32tm /resync' (admin).")
+            self.alert("error", f"clock drift: {warn}. Run 'w32tm /resync' (admin).")
         lead = self.ws.stats.clock_lead_lower_bound if self.ws else None
         if lead is not None and lead > thr:
             say(f"WARNING clock drift: exchange is at least {lead:.2f}s ahead (from WS).")
@@ -321,17 +419,34 @@ class Runner:
         next_settle = t_start + 30
         next_trade = t_start + 25
         tick_errors = 0
-        say(describe_mode(cfg))
+        self.alert("lifecycle", f"bot started ({describe_mode(cfg)})")
+        if self.telegram is not None and self.notifier is not None:
+            router = CommandRouter(self, self.telegram.chat_id)
+            self._poll_task = asyncio.create_task(
+                poll_commands(self.telegram, router, self.notifier, self.stop), name="telegram"
+            )
+        self.watchdog = Watchdog(
+            self._watchdog_cancel_fn(),
+            stall_seconds=60,
+            on_fire=lambda msg: self.notifier.alert("kill", msg) if self.notifier else None,
+        )
+        self.watchdog.start()
         try:
             while not self.stop.is_set():
                 await asyncio.sleep(1.0)
                 now = time.monotonic()
+                if self.watchdog is not None:
+                    self.watchdog.heartbeat()
+                if self.notifier is not None and self.notifier.pending:
+                    self._spawn("_notify_task", self.notifier.flush)
                 # Safety-critical steps first, outside the error-tolerant block.
                 for d in self.monitor.tick():
                     say(f"discontinuity: {d.cause.value} ({d.detail})")
                     self.gate.trip(d)
                 if self.kill_file.exists():
-                    say(f"KILL file found at {self.kill_file}; cancelling bot orders and stopping")
+                    self.alert(
+                        "kill", f"KILL file found at {self.kill_file}; cancelling and stopping"
+                    )
                     self.exit_code = EXIT_KILL
                     break
                 if self.gate.state is not GateState.RUNNING and (
@@ -364,7 +479,7 @@ class Runner:
                     with contextlib.suppress(Exception):
                         await self.ledger.record_error("housekeeping", repr(e))
                     if tick_errors >= MAX_CONSECUTIVE_TICK_ERRORS:
-                        say(f"{tick_errors} consecutive loop errors; exiting for a clean restart")
+                        self.alert("error", f"{tick_errors} consecutive loop errors; restarting")
                         self.exit_code = 1
                         break
         finally:
@@ -413,7 +528,12 @@ class Runner:
             say(f"shutdown: cancelled {len(res)} bot order(s)")
         except Exception as e:
             say(f"shutdown: cancel bot orders FAILED ({e!r}); exchange expiry will clear them")
-        for t in (self._shadow_task, self._settle_task, self._trade_task):
+        if self.watchdog is not None:
+            self.watchdog.stop()
+        for t in (
+            self._shadow_task, self._settle_task, self._trade_task, self._poll_task,
+            self._notify_task,
+        ):  # fmt: skip
             if t is not None and not t.done():
                 t.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -421,6 +541,12 @@ class Runner:
         await self._stop_ws()
         await self._drain_events()
         await self.weather_sources.aclose()
+        self.alert("lifecycle", f"bot stopped (exit code {self.exit_code})")
+        if self.notifier is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.notifier.flush(force_digest=True), timeout=10)
+        if self.telegram is not None:
+            await self.telegram.aclose()
 
 
 async def run_bot(
@@ -437,6 +563,7 @@ async def run_bot(
         say(f"{e}; refusing to start a second bot")
         return EXIT_ALREADY_RUNNING
     try:
+        install_signal_kill(settings.config.paths.kill_file)
         return await _run_locked(settings, signer, max_seconds, config_path)
     finally:
         lock.release()
@@ -458,6 +585,7 @@ async def _run_locked(
             with keep_awake(cfg.safety.prevent_sleep) as awake:
                 say(f"sleep prevention {'ON' if awake else 'off'}; ENV={settings.env.value}; "
                     "orders: " + describe_mode(cfg))  # fmt: skip
+                notifier, tg = _make_notifier(settings)
                 runner = Runner(
                     settings,
                     api,
@@ -466,7 +594,21 @@ async def _run_locked(
                     cfg.paths.kill_file,
                     max_seconds,
                     prod_public=prod_public,
+                    notifier=notifier,
+                    telegram=tg,
                 )
                 return await runner.run()
     finally:
         await ledger.close()
+
+
+def _make_notifier(settings: Settings) -> tuple[Notifier | None, TelegramClient | None]:
+    sec, a = settings.secrets, settings.config.alerts
+    token = sec.TELEGRAM_TOKEN.get_secret_value() if sec.TELEGRAM_TOKEN else ""
+    chat = (sec.TELEGRAM_CHAT_ID or "").strip()
+    if not token or not chat:
+        say("telegram: not configured (TELEGRAM_TOKEN / TELEGRAM_CHAT_ID empty); alerts off")
+        return None, None
+    client = TelegramClient(token, chat)
+    say("telegram: alerts + commands on (whitelisted chat only)")
+    return Notifier(client, frozenset(a.instant_kinds), a.fill_batch_minutes * 60), client
