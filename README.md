@@ -19,9 +19,9 @@ A maker-only (post-only limit orders, never crosses the spread) trading bot for 
 
 | Phase | Scope | State |
 |---|---|---|
-| 1 | Skeleton, settings validation, auth, read-only REST, tests | done; docs re-verified live 2026-11-04. Demo smoke test waits on the Key ID |
-| 1b | Windows port, V2 order endpoints, laptop-safety layer | done (offline tests); live demo order test waits on the Key ID |
-| 2 | WS book + reconciliation + ledger | not started |
+| 1 | Skeleton, settings validation, auth, read-only REST, tests | done; docs re-verified live, demo smoke test passes |
+| 1b | Windows port, V2 order endpoints, laptop-safety layer | done; live order round-trip waits on demo funds |
+| 2 | WS book + reconciliation + ledger | **done, awaiting review**. Shadow mode only, no orders |
 | 3 | Weather fair value (shadow mode) | not started |
 | 4–10 | see the spec | not started |
 
@@ -48,6 +48,8 @@ On Linux/macOS the equivalent is `chmod 600` on the key; the same check enforces
 ## Commands
 
 ```powershell
+.\.venv\Scripts\python.exe -m kalshi_maker run              # Phase 2: live books + ledger, NO orders
+.\.venv\Scripts\python.exe -m kalshi_maker run --max-seconds 120
 .\.venv\Scripts\python.exe -m kalshi_maker check-config     # validate config\config.yaml
 .\.venv\Scripts\python.exe -m kalshi_maker status           # exchange status (public)
 .\.venv\Scripts\python.exe -m kalshi_maker clock            # clock drift vs exchange (warns > 1 s)
@@ -68,6 +70,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1 -Integration  # + l
 
 The integration tests place one post-only, 1-contract YES bid at the lowest tick of a demo
 weather market, amend its expiry, cancel it and confirm it's gone.
+
+## Phase 2: what `run` does
+
+It watches every open market in the configured series (NYC, Miami and Chicago daily highs)
+over one WebSocket, keeps a local order book per market with sequence checking, and writes
+your fills, order updates, positions and balance to `data\ledger.db` (SQLite, append-only).
+It places no orders. Stop it with Ctrl+C, or create a file named `KILL` in the repo root
+(the bot then refuses to start until you delete it).
 
 ## Running on a laptop
 

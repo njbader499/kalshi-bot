@@ -6,6 +6,7 @@ python -m kalshi_maker balance
 python -m kalshi_maker markets [--series KXHIGHNY] [--status open] [--max 20]
 python -m kalshi_maker market TICKER
 python -m kalshi_maker orderbook TICKER [--depth 10]
+python -m kalshi_maker run [--max-seconds N]   # Phase 2: books + ledger, NO orders
 python -m kalshi_maker clock          # local clock vs exchange (warns if drift > 1 s)
 python -m kalshi_maker smoke          # all of the above in one go, for Phase 1 sign-off
 python -m kalshi_maker cancel-bot-orders   # cancel resting orders with the bot prefix only
@@ -29,7 +30,14 @@ from .continuity import describe_clock_offset
 from .logging_setup import setup_logging
 from .money import TickGrid
 from .rest import KalshiAPIError, KalshiREST, market_quote_summary
-from .settings import ConfigError, Settings, check_key_file, load_settings, startup_warning
+from .settings import (
+    ConfigError,
+    Settings,
+    check_key_file,
+    check_prod_gate,
+    load_settings,
+    startup_warning,
+)
 
 
 def _dump(obj: Any) -> str:
@@ -56,6 +64,11 @@ def _client(settings: Settings, auth: bool) -> KalshiREST:
 
 async def _run(args: argparse.Namespace, settings: Settings) -> int:
     cmd = args.cmd
+    if cmd == "run":
+        from .runner import run_bot
+
+        check_prod_gate(settings, settings.config.paths.data_dir / ".prod_confirmed")
+        return await run_bot(settings, _signer(settings), args.max_seconds)
     if cmd == "check-config":
         print("config OK")
         print(_dump(settings.config.risk.model_dump()))
@@ -164,6 +177,8 @@ def build_parser() -> argparse.ArgumentParser:
     ob = sub.add_parser("orderbook")
     ob.add_argument("ticker")
     ob.add_argument("--depth", type=int)
+    rn = sub.add_parser("run", help="Phase 2: live books + ledger + safety (no orders)")
+    rn.add_argument("--max-seconds", type=float, default=None)
     sub.add_parser("clock")
     sub.add_parser("cancel-bot-orders")
     sub.add_parser("upgrade-tier")

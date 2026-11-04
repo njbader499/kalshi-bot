@@ -12,6 +12,7 @@ costs one cent of demo money.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from decimal import Decimal
@@ -91,6 +92,12 @@ async def _far_market(api) -> tuple[str, TickGrid]:
 
 
 async def test_post_only_order_lifecycle(api, settings) -> None:
+    bal = await api.get_balance()
+    if bal.balance < Decimal("0.05"):
+        pytest.skip(
+            f"demo balance is ${bal.balance}: add demo funds on demo.kalshi.co to run the "
+            "order round-trip (it costs at most a cent)"
+        )
     ticker, grid = await _far_market(api)
     exp = int(time.time()) + settings.config.safety.order_expiry_seconds
     order = OrderRequest(
@@ -125,3 +132,42 @@ async def test_post_only_order_lifecycle(api, settings) -> None:
     assert after["status"] == "canceled"
     resting = [o async for o in api.iter_orders(ticker=ticker, status="resting")]
     assert oid not in {o["order_id"] for o in resting}
+
+
+async def test_ws_books_match_rest(api, settings) -> None:
+    """WS (use_yes_price=true, converted back) must equal the REST book (NO-leg prices)."""
+    import asyncio
+
+    from kalshi_maker.book import book_from_rest
+    from kalshi_maker.ws import KalshiWS
+
+    tickers = []
+    async for m in api.iter_markets(series_ticker="KXHIGHNY", status="open", limit=50):
+        tickers.append(m["ticker"])
+    assert tickers
+    ws = KalshiWS(settings.hosts.ws, _signer(settings), tickers[:6], user_channels=True)
+    stop = asyncio.Event()
+    task = asyncio.create_task(ws.run(stop))
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.2)
+            if all(b.valid for b in ws.books.values()):
+                break
+        assert all(b.valid for b in ws.books.values()), "no snapshots"
+        mismatches = []
+        for t in tickers[:6]:
+            for _attempt in range(3):  # a book can tick between the two reads; retry
+                rest = book_from_rest(t, await api.request("GET", f"/markets/{t}/orderbook"), 0)
+                wsb = ws.books[t]
+                if rest.yes == wsb.yes and rest.no == wsb.no:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                mismatches.append((t, rest.summary(), wsb.summary()))
+        assert not mismatches, mismatches
+        assert ws.stats.gaps == 0
+    finally:
+        stop.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task

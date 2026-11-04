@@ -175,6 +175,49 @@ before it's coded. **I'll raise this at the Phase 3 start.**
 - **Scripts** are PowerShell (`scripts/setup.ps1`, `scripts/check.ps1`); README commands
   are PowerShell.
 
+## Phase 2 decisions (2026-11-04)
+
+- **New dependencies**, checked on PyPI by exact name and project URL:
+  `websockets==17.2` (python-websockets/websockets; 17.3 is only 16 days old, so I took the
+  previous release for margin) and `aiosqlite==0.22.1` (omnilib). Neither has runtime deps.
+- **No proxy, ever.** `websockets` picks up a system proxy by default, so `proxy=None` is
+  passed explicitly.
+- **`use_yes_price: true`** on the order-book subscription. Kalshi will make it the default
+  and then remove the flag, so opting in now avoids a silent breaking change later.
+  `book.py` converts NO levels back to NO-leg pricing, so WS and REST books are identical.
+  **Verified live:** WS books equal REST books for 6 KXHIGHNY markets.
+- **Seq gaps.** Any gap or duplicate on the order-book `sid` invalidates every book on it
+  and sends one `get_snapshot` for all markets. Deltas for an invalid book are dropped, never
+  applied. Each snapshot replaces its book. A delta that would make a level negative
+  resyncs just that market. A snapshot overdue for more than 10 s forces a reconnect.
+- **No clock-based delta filtering.** The exchange clock can go backwards during
+  maintenance, so filtering on it could freeze a book. `seq` is the integrity check.
+- **Fills and orders on WS have no seq.** After every (re)connect the safety gate runs a
+  REST reconcile, which backfills fills and settlements into the ledger, deduplicated by
+  `trade_id`.
+- **Staleness.** A quiet market on a healthy connection isn't stale. Connection health
+  comes from websockets pings (20 s interval and timeout) plus seq continuity. A book is
+  usable iff `valid` and the socket is up. Phase 4's risk manager will gate on that plus
+  `stale_data_seconds` for fair values.
+- **Ledger.** SQLite WAL with `synchronous=FULL` (laptop power loss). Money is stored as
+  TEXT and floats are refused. Fills, settlements, order events, snapshots, config versions
+  and errors are append-only, enforced by triggers. A WS/REST copy of the same fill that
+  disagrees on count, price, fee or order is logged to `errors`. Any taker fill is logged
+  as an error, since the bot is maker-only. Order intents are written *before* sending
+  (used from Phase 4).
+- **Reconcile.** The first run looks back 30 days for fills and settlements; after that it
+  resumes from the last recorded fill with a 1 h overlap. A bot order still resting after
+  the cancel step fails reconciliation, so the gate retries the whole recovery. Manual
+  orders are counted and never touched.
+- **Watch set.** All open markets in KXHIGHNY, KXHIGHMIA and KXHIGHCHI (36 on demo
+  today). The 3-market quoting limit applies in Phase 4. Markets are re-discovered every
+  30 min; a changed set restarts the WebSocket, which trips the gate into full recovery.
+- **KILL file.** Detected within 1 s: cancels bot orders, exits with code 10, and blocks
+  startup until it's deleted.
+- **Git identity.** This laptop had none, so I set a repo-local `Claude
+  <noreply@anthropic.com>` to match the Phase 1 commit. Your global git config is
+  untouched.
+
 ## Design choices (Phase 1)
 
 - **Layout.** The repo root is the spec's `kalshi_maker/` directory, and the spec's `bot/`

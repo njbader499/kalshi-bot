@@ -187,6 +187,22 @@ class Safety(_Strict):
         return self
 
 
+class MarketsCfg(_Strict):
+    """Which markets the bot watches. Owner confirmed NYC, Miami, Chicago (2026-11-04)."""
+
+    weather_series: list[str] = Field(min_length=1, max_length=20)
+    rediscover_minutes: int = Field(ge=1, le=1440)
+    status_log_seconds: int = Field(ge=5, le=3600)
+
+    @field_validator("weather_series")
+    @classmethod
+    def _weather_only(cls, v: list[str]) -> list[str]:
+        bad = [t for t in v if not t.startswith(("KXHIGH", "KXLOW"))]
+        if bad:
+            raise ValueError(f"weather_series must be KXHIGH*/KXLOW* series, got {bad}")
+        return v
+
+
 class Alerts(_Strict):
     """Telegram alert policy (Phase 5). Fills are batched; risk/kill/error are instant."""
 
@@ -213,6 +229,7 @@ class AppConfig(_Strict):
     fees: Fees
     exclusions: Exclusions
     safety: Safety
+    markets: MarketsCfg
     alerts: Alerts
     paths: Paths
     logging: LoggingCfg

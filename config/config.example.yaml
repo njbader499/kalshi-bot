@@ -85,6 +85,13 @@ safety:
   prevent_sleep: true          # Windows SetThreadExecutionState while the bot runs
   cancel_order_on_pause: true  # exchange cancels our orders if trading is paused
 
+# Markets to watch (Phase 2: books + ledger only; quoting starts in Phase 4).
+# Confirmed by the owner 2026-11-04: the three most liquid daily-high series on prod.
+markets:
+  weather_series: ["KXHIGHNY", "KXHIGHMIA", "KXHIGHCHI"]
+  rediscover_minutes: 30     # weather markets roll daily; pick up new ones
+  status_log_seconds: 60
+
 # Alerts (Telegram arrives in Phase 5). Fills are batched; risk/kill/error alerts are instant.
 alerts:
   fill_batch_minutes: 15

@@ -4,4 +4,6 @@ cryptography==50.0.2
 pydantic==2.14.2
 pydantic-settings==2.16.2
 PyYAML==6.0.3
-# Added in later phases (pinned when introduced): websockets, aiosqlite, numpy, scipy
+websockets==17.2      # python-websockets/websockets; 17.3 (2026-10-19) is newer but < 2 weeks margin we want
+aiosqlite==0.22.1     # omnilib/aiosqlite; no runtime deps
+# Added in later phases (pinned when introduced): numpy, scipy
