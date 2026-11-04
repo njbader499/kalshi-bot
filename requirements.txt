@@ -6,4 +6,5 @@ pydantic-settings==2.16.2
 PyYAML==6.0.3
 websockets==17.2      # python-websockets/websockets; 17.3 (2026-10-19) is newer but < 2 weeks margin we want
 aiosqlite==0.22.1     # omnilib/aiosqlite; no runtime deps
+tzdata==2026.5        # python/tzdata (CPython datetime-sig); Windows has no tz database
 # Added in later phases (pinned when introduced): numpy, scipy

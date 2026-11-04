@@ -92,6 +92,19 @@ markets:
   rediscover_minutes: 30     # weather markets roll daily; pick up new ones
   status_log_seconds: 60
 
+# Weather fair-value engine (Phase 3, shadow mode: computes and logs, never trades).
+# Settlement: The Weather Company, proxied by the NWS Daily Climate Report (owner-approved
+# 2026-11-04); integer °F; NWS climate day in local standard time.
+weather:
+  dst_rule_rechecked: false    # MUST be re-verified before 2027-03-14 (US DST); see DECISIONS.md
+  sigma_f: 2.0                 # spread around each ensemble member's daily max (untuned prior)
+  nws_weight: 0.3              # weight of the NWS point forecast in the mixture
+  nws_sigma_f: 2.5
+  bias_f: 0.0                  # to be calibrated from the shadow log
+  min_confidence: 0.6          # below this, Phase 4 will not quote
+  fair_interval_minutes: 10
+  settlement_check_minutes: 60
+
 # Alerts (Telegram arrives in Phase 5). Fills are batched; risk/kill/error alerts are instant.
 alerts:
   fill_batch_minutes: 15

@@ -1,4 +1,5 @@
-"""Phase 2 orchestrator: live order books + ledger + laptop safety. Places NO orders.
+"""Orchestrator: live order books + ledger + laptop safety + weather shadow pricing.
+Places NO orders (Phases 2-3).
 
   python -m kalshi_maker run [--max-seconds N]
 
@@ -38,6 +39,9 @@ from .power import keep_awake
 from .reconcile import ReconcileReport, reconcile
 from .rest import KalshiREST
 from .settings import Settings
+from .weather.settlement import check_settlements
+from .weather.shadow import log_rows, make_engine, shadow_rows
+from .weather.sources import WeatherSources
 from .ws import KalshiWS, WSCallbacks
 
 log = logging.getLogger(__name__)
@@ -59,6 +63,7 @@ class Runner:
     signer: Signer
     kill_file: Path
     max_seconds: float | None = None
+    prod_public: KalshiREST | None = None  # read-only real prices/settlements (Phase 3)
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     exit_code: int = 0
 
@@ -68,6 +73,10 @@ class Runner:
         self._ws_task: asyncio.Task[None] | None = None
         self._recovery: asyncio.Task[bool] | None = None
         self.last_report: ReconcileReport | None = None
+        self.weather_sources = WeatherSources()
+        self.engine = make_engine(self.settings.config, self.weather_sources)
+        self._shadow_task: asyncio.Task[None] | None = None
+        self._settle_task: asyncio.Task[None] | None = None
         safety = self.settings.config.safety
         self.monitor = ContinuityMonitor(safety.clock_jump_seconds, safety.loop_stall_seconds)
         self.gate = SafetyGate(
@@ -173,6 +182,57 @@ class Runner:
             log.info("excluded", extra={"ticker": t, "reason": why})
         return tickers
 
+    # ---- Phase 3 shadow pricing (background; never blocks the safety loop) ----
+    async def _shadow_once(self) -> None:
+        prod = self.prod_public
+        if prod is None:
+            return
+
+        async def book(t: str) -> tuple[Any, Any]:
+            ob = await prod.get_orderbook(t)
+            return ob.best_yes_bid, (None if ob.best_no_bid is None else 1 - ob.best_no_bid)
+
+        def demo_book(t: str) -> tuple[Any, Any]:
+            b = self.ws.books.get(t) if self.ws else None
+            if b is None or not b.valid:
+                return None, None
+            return b.best_yes_bid, b.best_yes_ask
+
+        try:
+            rows = await shadow_rows(
+                self.settings.config, prod, self.engine, book, demo_book_for=demo_book
+            )
+            n = await log_rows(self.ledger, rows)
+            priced = [r for r in rows if r.fair is not None]
+            say(f"shadow: logged {n} fair values ({len(rows) - len(priced)} not priced)")
+        except Exception as e:
+            log.exception("shadow pricing failed")
+            await self.ledger.record_error("shadow_pricing", repr(e))
+
+    async def _settlement_once(self) -> None:
+        prod = self.prod_public
+        if prod is None:
+            return
+        try:
+            chk = await check_settlements(
+                prod, self.weather_sources, self.settings.config.markets.weather_series
+            )
+            for mm in chk.mismatches:
+                say(f"SETTLEMENT MISMATCH vs NWS CLI: {mm}")
+                await self.ledger.record_error("settlement_mismatch", mm)
+            say(
+                f"settlement check: {chk.agreed}/{chk.checked} agree with NWS CLI, "
+                f"{len(chk.mismatches)} mismatch"
+            )
+        except Exception as e:
+            log.exception("settlement check failed")
+            await self.ledger.record_error("settlement_check", repr(e))
+
+    def _spawn(self, attr: str, coro_fn: Any) -> None:
+        t = getattr(self, attr)
+        if t is None or t.done():
+            setattr(self, attr, asyncio.create_task(coro_fn()))
+
     # ---- checks ----
     async def _clock_check(self) -> None:
         thr = self.settings.config.safety.clock_drift_warn_seconds
@@ -226,6 +286,8 @@ class Runner:
         next_status = t_start + 5
         next_clock = t_start + CLOCK_CHECK_SECONDS
         next_discover = t_start + cfg.markets.rediscover_minutes * 60
+        next_shadow = t_start + 20
+        next_settle = t_start + 30
         try:
             while not self.stop.is_set():
                 await asyncio.sleep(1.0)
@@ -254,6 +316,12 @@ class Runner:
                     if new and self.ws and new != sorted(self.ws.books):
                         say("market set changed; restarting websocket")
                         await self._start_ws(new)
+                if now >= next_shadow:
+                    self._spawn("_shadow_task", self._shadow_once)
+                    next_shadow = now + cfg.weather.fair_interval_minutes * 60
+                if now >= next_settle:
+                    self._spawn("_settle_task", self._settlement_once)
+                    next_settle = now + cfg.weather.settlement_check_minutes * 60
                 if self.max_seconds is not None and now - t_start >= self.max_seconds:
                     say(f"--max-seconds {self.max_seconds:g} reached; stopping")
                     break
@@ -270,8 +338,14 @@ class Runner:
             say(f"shutdown: cancelled {len(res)} bot order(s)")
         except Exception as e:
             say(f"shutdown: cancel bot orders FAILED ({e!r}); exchange expiry will clear them")
+        for t in (self._shadow_task, self._settle_task):
+            if t is not None and not t.done():
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
         await self._stop_ws()
         await self._drain_events()
+        await self.weather_sources.aclose()
 
 
 async def run_bot(settings: Settings, signer: Signer, max_seconds: float | None) -> int:
@@ -281,11 +355,23 @@ async def run_bot(settings: Settings, signer: Signer, max_seconds: float | None)
         cfg_path = Path("config/config.yaml")
         if cfg_path.exists():
             await ledger.record_config(cfg_path.read_text(encoding="utf-8"))
-        async with KalshiREST(settings.hosts.rest, cfg.rate_limits, signer=signer) as api:
+        prod_public = KalshiREST(cfg.hosts.prod.rest, cfg.rate_limits)  # no signer: public
+        async with (
+            KalshiREST(settings.hosts.rest, cfg.rate_limits, signer=signer) as api,
+            prod_public,
+        ):
             with keep_awake(cfg.safety.prevent_sleep) as awake:
                 say(f"sleep prevention {'ON' if awake else 'off'}; ENV={settings.env.value}; "
-                    "Phase 2 shadow mode: NO orders are placed")  # fmt: skip
-                runner = Runner(settings, api, ledger, signer, cfg.paths.kill_file, max_seconds)
+                    "shadow mode: NO orders are placed")  # fmt: skip
+                runner = Runner(
+                    settings,
+                    api,
+                    ledger,
+                    signer,
+                    cfg.paths.kill_file,
+                    max_seconds,
+                    prod_public=prod_public,
+                )
                 return await runner.run()
     finally:
         await ledger.close()

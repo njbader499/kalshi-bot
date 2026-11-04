@@ -21,8 +21,8 @@ A maker-only (post-only limit orders, never crosses the spread) trading bot for 
 |---|---|---|
 | 1 | Skeleton, settings validation, auth, read-only REST, tests | done; docs re-verified live, demo smoke test passes |
 | 1b | Windows port, V2 order endpoints, laptop-safety layer | done; live order round-trip waits on demo funds |
-| 2 | WS book + reconciliation + ledger | **done, awaiting review**. Shadow mode only, no orders |
-| 3 | Weather fair value (shadow mode) | not started |
+| 2 | WS book + reconciliation + ledger | done, approved |
+| 3 | Weather fair value (shadow mode) | **done, awaiting review**. Logs fair vs prod prices, no orders |
 | 4–10 | see the spec | not started |
 
 ## Setup (Windows, PowerShell)
@@ -50,6 +50,7 @@ On Linux/macOS the equivalent is `chmod 600` on the key; the same check enforces
 ```powershell
 .\.venv\Scripts\python.exe -m kalshi_maker run              # Phase 2: live books + ledger, NO orders
 .\.venv\Scripts\python.exe -m kalshi_maker run --max-seconds 120
+.\.venv\Scripts\python.exe -m kalshi_maker fair             # Phase 3: fair value vs prod bid/ask (no orders)
 .\.venv\Scripts\python.exe -m kalshi_maker check-config     # validate config\config.yaml
 .\.venv\Scripts\python.exe -m kalshi_maker status           # exchange status (public)
 .\.venv\Scripts\python.exe -m kalshi_maker clock            # clock drift vs exchange (warns > 1 s)
@@ -78,6 +79,14 @@ over one WebSocket, keeps a local order book per market with sequence checking, 
 your fills, order updates, positions and balance to `data\ledger.db` (SQLite, append-only).
 It places no orders. Stop it with Ctrl+C, or create a file named `KILL` in the repo root
 (the bot then refuses to start until you delete it).
+
+## Phase 3: weather fair value (shadow mode)
+
+`fair` prices today's and tomorrow's NYC / Miami / Chicago daily-high brackets and prints
+them next to the **prod** bid/ask (real prices, read-only). It logs every row to the ledger
+and cross-checks every recently settled market against the NWS climate report. `run` does
+the same every 10 minutes (settlement check hourly). The model's parameters are untuned
+priors: these numbers are for calibration, not a claim of edge.
 
 ## Running on a laptop
 

@@ -7,6 +7,7 @@ python -m kalshi_maker markets [--series KXHIGHNY] [--status open] [--max 20]
 python -m kalshi_maker market TICKER
 python -m kalshi_maker orderbook TICKER [--depth 10]
 python -m kalshi_maker run [--max-seconds N]   # Phase 2: books + ledger, NO orders
+python -m kalshi_maker fair        # Phase 3: weather fair value vs bid/ask, NO orders
 python -m kalshi_maker clock          # local clock vs exchange (warns if drift > 1 s)
 python -m kalshi_maker smoke          # all of the above in one go, for Phase 1 sign-off
 python -m kalshi_maker cancel-bot-orders   # cancel resting orders with the bot prefix only
@@ -69,6 +70,8 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
 
         check_prod_gate(settings, settings.config.paths.data_dir / ".prod_confirmed")
         return await run_bot(settings, _signer(settings), args.max_seconds)
+    if cmd == "fair":
+        return await _fair(settings, args)
     if cmd == "check-config":
         print("config OK")
         print(_dump(settings.config.risk.model_dump()))
@@ -144,6 +147,58 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+async def _fair(settings: Settings, args: argparse.Namespace) -> int:
+    """Phase 3 shadow: fair value vs Kalshi bid/ask for today's and tomorrow's brackets."""
+    from .ledger import Ledger
+    from .weather.settlement import check_settlements
+    from .weather.shadow import format_table, log_rows, make_engine, shadow_rows
+    from .weather.sources import WeatherSources
+
+    cfg = settings.config
+    sources = WeatherSources()
+    ledger = await Ledger.open(cfg.paths.data_dir / "ledger.db")
+    # Real prices and real settlements live on PROD; read them publicly (no auth, no orders).
+    prod = KalshiREST(cfg.hosts.prod.rest, cfg.rate_limits)
+    try:
+        async with _client(settings, False) as demo_api:
+            engine = make_engine(cfg, sources)
+
+            def booker(api: KalshiREST) -> Any:
+                async def book(t: str) -> tuple[Decimal | None, Decimal | None]:
+                    ob = await api.get_orderbook(t)
+                    ask = None if ob.best_no_bid is None else 1 - ob.best_no_bid
+                    return ob.best_yes_bid, ask
+
+                return book
+
+            rows = await shadow_rows(
+                cfg, prod, engine, booker(prod), demo_book_for=booker(demo_api)
+            )
+            print(format_table(rows, cfg.weather.min_confidence))
+            n = await log_rows(ledger, rows)
+            print()
+            print(f"logged {n} fair-value snapshot(s) to {cfg.paths.data_dir / 'ledger.db'}")
+            print(
+                "SHADOW MODE: no orders placed. bid/ask = PROD public book; demo b/a for reference."
+            )
+            if not args.no_settlement_check:
+                chk = await check_settlements(prod, sources, cfg.markets.weather_series)
+                print(
+                    f"settlement check, prod, last 8 days: {chk.checked} checked, "
+                    f"{chk.agreed} agree with NWS CLI, {len(chk.mismatches)} MISMATCH, "
+                    f"skipped: {chk.skipped_no_cli} CLI aged out, {chk.skipped_no_value} no value; "
+                    f"{chk.unparsed} unparsed"
+                )
+                for mm in chk.mismatches:
+                    print(f"  MISMATCH {mm}")
+                    await ledger.record_error("settlement_mismatch", mm)
+    finally:
+        await prod.aclose()
+        await ledger.close()
+        await sources.aclose()
+    return 0
+
+
 def _report_clock(chk: Any, settings: Settings) -> int:
     if chk is None:
         print("clock: exchange sent no Date header; drift unknown")
@@ -179,6 +234,8 @@ def build_parser() -> argparse.ArgumentParser:
     ob.add_argument("--depth", type=int)
     rn = sub.add_parser("run", help="Phase 2: live books + ledger + safety (no orders)")
     rn.add_argument("--max-seconds", type=float, default=None)
+    fv = sub.add_parser("fair", help="Phase 3 shadow: weather fair value vs Kalshi (no orders)")
+    fv.add_argument("--no-settlement-check", action="store_true")
     sub.add_parser("clock")
     sub.add_parser("cancel-bot-orders")
     sub.add_parser("upgrade-tier")

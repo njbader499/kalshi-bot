@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS fair_value_snapshots (
     source          TEXT NOT NULL,
     as_of           TEXT NOT NULL,
     yes_bid         TEXT,
-    yes_ask         TEXT
+    yes_ask         TEXT,
+    detail          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS config_versions (
@@ -159,6 +160,14 @@ def _triggers() -> str:
     return "\n".join(out)
 
 
+async def _migrate(db: aiosqlite.Connection) -> None:
+    """Additive, idempotent schema changes for ledgers created by older versions."""
+    async with db.execute("PRAGMA table_info(fair_value_snapshots)") as cur:
+        cols = {row[1] async for row in cur}
+    if "detail" not in cols:  # added in Phase 3
+        await db.execute("ALTER TABLE fair_value_snapshots ADD COLUMN detail TEXT")
+
+
 def _j(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, default=str)
 
@@ -185,6 +194,7 @@ class Ledger:
         await db.execute("PRAGMA synchronous=FULL")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.executescript(_TABLES + _triggers())
+        await _migrate(db)
         await db.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -384,12 +394,16 @@ class Ledger:
         as_of: str,
         yes_bid: str | None,
         yes_ask: str | None,
+        detail: Any = None,
     ) -> None:
         await self.db.execute(
             "INSERT INTO fair_value_snapshots (taken_at, ticker, fair, confidence, source, "
-            "as_of, yes_bid, yes_ask) VALUES (?,?,?,?,?,?,?,?)",
-            (self._clock(), ticker, fair, confidence, source, as_of, yes_bid, yes_ask),
-        )
+            "as_of, yes_bid, yes_ask, detail) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                self._clock(), ticker, fair, confidence, source, as_of, yes_bid, yes_ask,
+                None if detail is None else _j(detail),
+            ),
+        )  # fmt: skip
         await self.db.commit()
 
     async def record_config(self, content: str) -> str:

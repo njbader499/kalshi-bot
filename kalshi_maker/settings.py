@@ -203,6 +203,21 @@ class MarketsCfg(_Strict):
         return v
 
 
+class WeatherCfg(_Strict):
+    """Phase 3 weather fair-value engine. Model params are untuned priors; see DECISIONS.md."""
+
+    # Owner-approved climate-day rule (NWS LST day) must be re-verified before US DST
+    # resumes 2027-03-14. Until this is set true, DST-season dates are refused.
+    dst_rule_rechecked: bool = False
+    sigma_f: float = Field(ge=0.3, le=10)
+    nws_weight: float = Field(ge=0, le=1)
+    nws_sigma_f: float = Field(ge=0.3, le=10)
+    bias_f: float = Field(ge=-5, le=5)
+    min_confidence: float = Field(ge=0, le=1)
+    fair_interval_minutes: int = Field(ge=1, le=240)
+    settlement_check_minutes: int = Field(ge=5, le=1440)
+
+
 class Alerts(_Strict):
     """Telegram alert policy (Phase 5). Fills are batched; risk/kill/error are instant."""
 
@@ -230,6 +245,7 @@ class AppConfig(_Strict):
     exclusions: Exclusions
     safety: Safety
     markets: MarketsCfg
+    weather: WeatherCfg
     alerts: Alerts
     paths: Paths
     logging: LoggingCfg

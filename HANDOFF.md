@@ -3,7 +3,7 @@
 Current state of the Kalshi maker bot, for whoever picks this up next (human or Claude).
 Spec: `KALSHI_MAKER_BOT_PROMPT.md`. Every decision and doc conflict: `DECISIONS.md`.
 
-_Last updated: 2026-11-04 (Phase 3 paused on settlement wording)._
+_Last updated: 2026-11-04 (Phase 3 done in shadow mode; stopped for owner review)._
 
 ## Where things stand
 
@@ -12,7 +12,7 @@ _Last updated: 2026-11-04 (Phase 3 paused on settlement wording)._
 | 1 Skeleton, auth, read-only REST | done, verified live on demo |
 | 1b Windows port, V2 orders, laptop safety | done; **demo order round-trip passes** (place → amend expiry → cancel) |
 | 2 WS books + reconciliation + ledger | done, **approved by owner 2026-11-04** |
-| 3 Weather fair value (shadow mode) | **paused**: settlement wording ambiguous; owner decision needed (below) |
+| 3 Weather fair value (shadow mode) | **done, awaiting owner review**. `fair` / `run` log fair vs prod prices; no orders |
 | 4+ | not started |
 
 Environment: owner's Windows 11 laptop in Prague (Kalshi reachable directly; never add
@@ -46,22 +46,24 @@ to start otherwise. Never print or log key contents.
   ambiguous.
 - Commit and push after each milestone; stop for review at the end of each phase.
 
-## Blocking decision for Phase 3 (asked 2026-11-04)
+## Phase 3 state (shadow mode, no orders)
 
-Settlement rules were pulled from the API and quoted verbatim in DECISIONS.md ("Weather
-settlement rules: exact wording"). Source = The Weather Company for all three series;
-stations = NWS CLI Central Park / Miami / Chicago-Midway. Three things are not stated:
-(1) the precision of the final value (the brackets only work for integers), (2) the day
-window (the text says 11:59 PM local, but close_time is 1:00 AM local standard), and (3)
-whether TWC republishes the NWS CLI value. Proposed handling, awaiting the owner's answer:
-
-1. Model the settlement value as an integer °F (the strikes, subtitles and CLI reports all
-   imply it). Log any settlement that contradicts this.
-2. Use the NWS CLI day (local standard time). It equals the calendar day until DST resumes on
-   2027-03-14; revisit before then.
-3. Use the NWS CLI report + NWS observations as the proxy for TWC's number. After each
-   settlement, compare Kalshi's result with the CLI value and auto-flag any disagreement.
-   Don't scrape weather.com's undocumented backend unless the owner asks.
+- Settlement model approved by the owner 2026-11-04: integer °F; NWS climate day in LST;
+  NWS CLI + observations as the proxy for The Weather Company; "greater than X" = X+1 or
+  above, "less than X" = X-1 or below, "between" inclusive. Quotes are in DECISIONS.md.
+- **Proxy check:** 126/126 prod settlements in the last 7 days match the NWS CLI exactly.
+  Runs automatically (`fair`, and hourly in `run`); mismatches go to ledger `errors`.
+- **DST reminder:** before **2027-03-14**, re-verify the climate-day rule, then set
+  `weather.dst_rule_rechecked: true`. Until then DST dates are refused (logged reminder
+  from 2027-02-28).
+- Model parameters are **untuned priors**. Tomorrow's fair values differ a lot from prod
+  prices in places, so calibrate before trusting them. Same-day prices without an official
+  intraday CLI are low-confidence (0.5) by design: hourly METARs miss peaks.
+- Next: let `run` collect a few days of shadow data, then build the calibration report
+  (Brier score / reliability by city, per-station bias), as the spec's Phase 3 asks.
+- Local ledger note: `errors` holds 126 false-positive `settlement_mismatch` rows from the
+  first demo-based check, plus one `retraction` row explaining them (the table is
+  append-only).
 
 ## Open items for the owner
 
@@ -69,6 +71,8 @@ whether TWC republishes the NWS CLI value. Proposed handling, awaiting the owner
   admin PowerShell: `Set-Service W32Time -StartupType Automatic; Start-Service W32Time;
   w32tm /resync`
 - Duplicate `client_order_id` → 409 is still assumed, not observed.
+- Old checkouts at `0f27b14` have a chmod-based `test_key_file_permissions` that fails on
+  Windows; it was replaced in `592adc3` by an ACL check (passes on the owner's locked key).
 
 ## Gotchas learned the hard way
 
@@ -79,3 +83,7 @@ whether TWC republishes the NWS CLI value. Proposed handling, awaiting the owner
 - Demo weather markets use sub-cent edge ticks (0.001 below $0.10 and above $0.90).
 - PowerShell here-strings can't be piped to `git commit -F -`; write the message to a file.
 - Git identity is repo-local `Claude <noreply@anthropic.com>`.
+- NWS lists CLI products before they're fetchable (404). Demo's settled markets have no
+  `expiration_value`; use prod public data for settlements and real prices.
+- Windows Python needs `tzdata` for `zoneinfo`.
+- Bash heredocs with mixed quotes fail in this shell; put scripts in files.

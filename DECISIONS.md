@@ -177,7 +177,7 @@ are the NWS Daily Climate Report product IDs for **Central Park NY** (office OKX
 "Official Climate Reports: verified climate observations from official government climate
 stations" with a "Daily Climate" tab. It has no documented API.
 
-### OPEN: settlement-wording ambiguities (stopped for the owner, 2026-11-04)
+### Settlement-wording ambiguities: RESOLVED by the owner 2026-11-04 (see Phase 3)
 
 What is clear: the source is The Weather Company (NWS second in the hierarchy). The
 stations are the NWS CLI stations above. "greater than X" is strictly > X, "less than X" is
@@ -201,7 +201,7 @@ What is NOT stated anywhere in the API text or the contract terms:
    government climate stations", which suggests the former, but it isn't stated, and the
    data feed is undocumented.
 
-Phase 3 is paused on these. See HANDOFF.md for the proposed handling.
+**Owner's decision (2026-11-04):** all three proposals approved; see "Phase 3 decisions" below.
 
 ### Live demo results (2026-11-04, authenticated)
 
@@ -332,6 +332,85 @@ Phase 3 is paused on these. See HANDOFF.md for the proposed handling.
 - **Git identity.** This laptop had none, so I set a repo-local `Claude
   <noreply@anthropic.com>` to match the Phase 1 commit. Your global git config is
   untouched.
+
+## Phase 3 decisions (2026-11-04): weather fair value, shadow mode
+
+**Owner-approved settlement model:**
+1. The settlement value is an **integer °F**.
+2. The day is the **NWS climate day in local standard time**: [00:00, 24:00) at the
+   station's fixed standard offset (in DST that is 01:00 to 00:59 local daylight time).
+   **Dated reminder:** recheck before US DST resumes on **2027-03-14**. The engine refuses
+   any DST-season date until `weather.dst_rule_rechecked: true`, and logs a reminder from
+   2027-02-28.
+3. **NWS CLI + observations are the proxy** for The Weather Company's number, and every
+   finalized market is cross-checked automatically. Mismatches go to ledger `errors`
+   (`settlement_mismatch`) and the runner prints them.
+4. **Strike semantics** (owner): "greater than X" = X+1 or above; "less than X" = X-1 or
+   below; "between A-B" = A..B inclusive. Unit-tested on the exact quoted rules strings,
+   including a check that every integer falls in exactly one bracket of a live event.
+
+**The parser accepts only the verified template.** Rules text, station code, series→station
+mapping, floor/cap strikes and `yes_sub_title` must all agree, or the market isn't priced.
+A source other than "The Weather Company", a decimal strike, or extra wording means refusal.
+
+**Proxy validated live:** on 2026-11-04, 126 of 126 prod markets settled in the prior 7
+days (NYC, Miami, Chicago) had `expiration_value` equal to the final NWS CLI max (whole
+numbers, e.g. "68.00") and a `result` matching our strike semantics. 18 more were too old
+for the NWS CLI listing (it keeps about 7 days).
+
+**Data sources (all verified live, field names in `weather/sources.py`):**
+- Open-Meteo ensemble: GEFS (31 series) + ECMWF IFS 0.25° (51 series) = 82, hourly °F,
+  UTC. Each member's max over the LST window (needs ≥ 20 of 24 hours).
+- NWS hourly point forecast (`/points` → `forecastHourly`) as a mixture component (weight
+  0.3). Only hours not yet past are used.
+- NWS observations (KNYC, KMIA, KMDW; QC flags X/Q dropped) give the extreme so far.
+- NWS CLI products (`CLINYC`, `CLIMIA`, `CLIMDW`): final ones pin the outcome; intraday
+  "VALID … AS OF" ones are official hard bounds.
+- Prices: **prod public order books** (read-only, unauthenticated). Demo books are thin and
+  not real prices, so they're shown for reference only. Settlements are also read from
+  prod, because demo's finalized markets have an empty `expiration_value`.
+
+**Model (`weather/model.py`)**: latent T ~ mixture of N(member + bias, σ) and
+N(NWS + bias, σ_nws); reported X = round-half-up(T); P(X = k) integrates each component
+over [k−0.5, k+0.5). Statistics are float; the fair price becomes a Decimal (4 dp) only at
+the boundary. **All parameters are untuned priors** (σ 2.0 °F, NWS weight 0.3 / σ 2.5 °F,
+bias 0, observation slack 5%), bounds-checked at load. Calibrating them is the point of the
+shadow log.
+
+**Observation conditioning.** A METAR-derived extreme r is a *soft* bound: X ≥ r with
+probability 0.95, X = r−1 with probability 0.05 (°C→°F conversion can be a degree off).
+The first version used a hard "r−1" floor. With an observed 78.08 °F it put most of the
+mass on exactly 77, giving P(≥78) = 0.25 for a near-certain outcome. A unit test caught
+it before it shipped.
+
+**Same-day confidence is halved without an official CLI value.** Live on 2026-11-04,
+hourly readings gave 71 / 84 / 70 °F so far while prod was already bidding 0.99 on
+NYC 72-73, Miami 85-86 and Chicago 69-70: hourly readings miss peaks between reports.
+The METAR 6-hour max groups I checked through the NWS API were incomplete and
+inconsistent, so I'm not relying on them. Halved confidence (0.5) is below
+`min_confidence` 0.6, so Phase 4 won't quote same-day markets on hourly evidence alone.
+An intraday CLI value restores it.
+
+**Live shadow comparison 2026-11-04 (tomorrow's brackets, prod):** the untuned model
+disagrees with the market by up to 0.65 on some brackets (e.g. Miami 86-87: fair 0.11 vs
+bid 0.76; Chicago ≤54: 0.45 vs 0.79). Treat that as model error until calibration says
+otherwise. **No edge is claimed.** The raw ensemble median (Miami 82.5 °F) sits well below
+the NWS forecast (84) and the market's implied peak (~86-87), which is the kind of
+station bias the planned per-station bias correction targets.
+
+**Robustness:**
+- NWS lists some CLI products before they can be fetched (404 seen live). A failed
+  product is skipped for that round and retried, never cached as bad, and never sinks a
+  whole city's pricing.
+- **False-positive incident:** the first live settlement check ran against demo, read empty
+  `expiration_value`s as mismatches, and wrote 126 bogus `settlement_mismatch` rows to the
+  local `data\ledger.db`. That table is append-only, so the rows stay, and one
+  `retraction` row now explains them. Fixed: empty values are skipped, and the check
+  always reads prod.
+- `tzdata==2026.5` added (python/tzdata). Windows has no time-zone database, so `zoneinfo`
+  couldn't resolve America/New_York without it. 2026.6 is only a week old.
+- Weather fetches run as background tasks in the runner. They can never block the safety
+  loop, and failures are logged to the ledger.
 
 ## Design choices (Phase 1)
 
