@@ -22,6 +22,7 @@ Deliberately NOT exposed: enabling trading, raising limits, clearing a KILL, tak
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import secrets
@@ -271,6 +272,7 @@ async def poll_commands(
     notifier: Notifier,
     stop: asyncio.Event,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    on_command: Callable[[str, bool], None] | None = None,
 ) -> None:
     """Long-poll getUpdates. Errors back off and retry; never raises except on cancel."""
     offset: int | None = None
@@ -295,4 +297,10 @@ async def poll_commands(
                 reply = f"command failed: {type(e).__name__}"
             if reply:
                 notifier.alert("reply", reply)
+            if on_command is not None and reply is not None:
+                # command name only (never arguments such as confirmation codes)
+                text = str((u.get("message") or {}).get("text") or "").split()
+                name = text[0].split("@", 1)[0] if text else "?"
+                with contextlib.suppress(Exception):
+                    on_command(name, bool(reply))
         await notifier.flush()

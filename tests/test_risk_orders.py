@@ -323,14 +323,73 @@ async def test_off_grid_quote_is_refused_by_validation() -> None:
     assert p.resting == {}  # create_failed (validation), nothing resting
 
 
-async def test_ws_fill_updates_portfolio() -> None:
+async def test_ws_fill_updates_positions_user_order_updates_resting() -> None:
     m, p, _ = om()
     await m.sync({"E0-M0": quote("0.70", count=3)}, GRIDS, True)
     oid = next(iter(p.resting))
     fill = {"order_id": oid, "market_ticker": "E0-M0", "book_side": "bid", "count_fp": "2.00"}
     m.on_fill({**fill, "yes_price_dollars": "0.7000", "fee_cost": "0.000000"})
-    assert p.positions["E0-M0"].qty == 2 and p.resting[oid].remaining == 1
-    assert m.filled[oid] == 2
+    assert p.positions["E0-M0"].qty == 2
+    assert p.resting[oid].remaining == 3  # resting size only from user_order (absolute)
+    note = m.on_user_order({"order_id": oid, "status": "resting", "remaining_count_fp": "1.00",
+                            "fill_count_fp": "2.00"})  # fmt: skip
+    assert note is None and p.resting[oid].remaining == 1 and m.filled[oid] == 2
+    # replaying the same messages can't double count
+    m.on_user_order({"order_id": oid, "status": "resting", "remaining_count_fp": "1.00",
+                     "fill_count_fp": "2.00"})  # fmt: skip
+    assert p.resting[oid].remaining == 1 and m.filled[oid] == 2
+
+
+@pytest.mark.parametrize("status,reason", [("canceled", "ExpiryCancel"), ("executed", "Trade")])
+async def test_user_order_terminal_status_frees_the_market(status: str, reason: str) -> None:
+    m, p, _ = om()
+    await m.sync({"E0-M0": quote("0.70")}, GRIDS, True)
+    oid = next(iter(p.resting))
+    note = m.on_user_order({"order_id": oid, "status": status, "last_update_reason": reason})
+    assert note and status in note and p.resting == {}
+    await m.sync({"E0-M0": quote("0.70")}, GRIDS, True)  # re-quotes after expiry/fill
+    assert len(p.resting) == 1
+    assert m.on_user_order({"order_id": "unknown", "status": "canceled"}) is None
+
+
+class RecordingExecutor(DryRunExecutor):
+    def __init__(self) -> None:
+        self.amends: list[tuple[str, D, D, int]] = []
+
+    async def amend(self, o: RestingOrder, price: D, total: D, exp: int) -> None:
+        self.amends.append((o.order_id, price, total, exp))
+
+
+async def test_expiry_refresh_is_expiry_only_and_only_when_due() -> None:
+    ex = RecordingExecutor()
+    m, p, c = om(executor=ex)
+    await m.sync({"E0-M0": quote("0.70", count=2)}, GRIDS, True)
+    o = next(iter(p.resting.values()))
+    m.filled[o.order_id] = D(1)
+    assert await m.refresh_expiries() == 0  # fresh order: 600 s left
+    c.t += 300  # 300 s left < 360 threshold
+    assert await m.refresh_expiries() == 1
+    _oid, price, total, exp = ex.amends[0]
+    assert (price, total) == (D("0.70"), D(3))  # same price, total = filled + remaining
+    assert exp == int(c.t) + CFG.safety.order_expiry_seconds and o.expiration_time == exp
+
+
+async def test_expiry_refresh_stops_when_trading_not_allowed() -> None:
+    ex = RecordingExecutor()
+    c = Clock()
+    r = rm(clock=c)
+    m, _p, _ = om(executor=ex, clock=c, risk=r)
+    await m.sync({"E0-M0": quote("0.70")}, GRIDS, True)
+    r.kill("test")
+    c.t += 500
+    assert await m.refresh_expiries() == 0 and ex.amends == []  # orders die on their own
+
+
+async def test_create_counter_for_first_order_alert() -> None:
+    m, _, _ = om()
+    assert m.creates == 0 and m.last_created is None
+    await m.sync({"E0-M0": quote("0.70")}, GRIDS, True)
+    assert m.creates == 1 and m.last_created is not None and m.last_created.ticker == "E0-M0"
 
 
 # ---------- the hard switch ----------

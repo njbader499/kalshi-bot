@@ -226,10 +226,16 @@ async def test_poll_loop_backs_off_on_errors_and_replies() -> None:
     async def fake_sleep(s: float) -> None:
         sleeps.append(s)
 
+    handled: list[tuple[str, bool]] = []
     await asyncio.wait_for(
-        poll_commands(tg, CommandRouter(FakeControl(), CHAT), n, stop, sleep=fake_sleep), 5
-    )
+        poll_commands(
+            tg, CommandRouter(FakeControl(), CHAT), n, stop, sleep=fake_sleep,
+            on_command=lambda c, ok: handled.append((c, ok)),
+        ),
+        5,
+    )  # fmt: skip
     assert sleeps == [1.0] and sender.msgs == ["[REPLY] STATUS"]
+    assert handled == [("/status", True)]
     await tg.aclose()
 
 

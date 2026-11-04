@@ -90,6 +90,7 @@ class Runner:
         self._settle_task: asyncio.Task[None] | None = None
         self._trade_task: asyncio.Task[None] | None = None
         self._notify_task: asyncio.Task[None] | None = None
+        self._first_order_alerted = False
         self._poll_task: asyncio.Task[None] | None = None
         if self.notifier is None:  # no Telegram configured: alerts go nowhere
             self.notifier = Notifier(None, frozenset(), 3600)
@@ -265,6 +266,10 @@ class Runner:
                             f"{m.get('count_fp')} @ {m.get('yes_price_dollars')}")  # fmt: skip
                 else:
                     await self.ledger.record_order_event(m)
+                    if self.trading.live:
+                        note = self.trading.om.on_user_order(m)
+                        if note:
+                            self.alert("info", note)
             except Exception as e:
                 log.exception("ledger write failed")
                 await self.ledger.record_error("ledger_write", repr(e), m)
@@ -343,6 +348,19 @@ class Runner:
             return
         try:
             events = await self.trading.step(self.ws.books, self.gate.can_quote)
+            om = self.trading.om
+            if self.trading.live and om.creates and not self._first_order_alerted:
+                self._first_order_alerted = True
+                q = om.last_created
+                what = (
+                    f"{q.ticker} {'buy YES' if q.side == 'bid' else 'buy NO'} "
+                    f"{q.count} @ YES price {q.price}"
+                    if q
+                    else "?"
+                )
+                self.alert(
+                    "lifecycle", f"FIRST LIVE ORDER placed on {self.settings.env.value}: {what}"
+                )
             for e in events:
                 self.alert("risk", f"RISK STOP: {e} (all bot orders cancelled)")
                 await self.ledger.record_error("risk_stop", e)
@@ -423,7 +441,14 @@ class Runner:
         if self.telegram is not None and self.notifier is not None:
             router = CommandRouter(self, self.telegram.chat_id)
             self._poll_task = asyncio.create_task(
-                poll_commands(self.telegram, router, self.notifier, self.stop), name="telegram"
+                poll_commands(
+                    self.telegram,
+                    router,
+                    self.notifier,
+                    self.stop,
+                    on_command=lambda c, ok: say(f"telegram: {c} handled, reply queued"),
+                ),
+                name="telegram",
             )
         self.watchdog = Watchdog(
             self._watchdog_cancel_fn(),

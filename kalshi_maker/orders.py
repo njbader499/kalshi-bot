@@ -112,6 +112,9 @@ class OrderManager:
         self.filled: dict[str, Decimal] = {}  # order_id -> filled so far (amend needs total)
         self._last_amend: dict[str, float] = {}
         self.blocked: set[str] = set()  # markets with an order of unknown outcome
+        self.creates = 0  # successful creates this session
+        self.last_created: DesiredQuote | None = None
+        self.refresh_seconds = max(30, expiry_seconds * 2 // 5)  # 240 s for a 600 s expiry
 
     async def _log(self, action: str, ticker: str, side: str, price: Decimal | None,
                    count: Decimal | None, reason: str) -> None:  # fmt: skip
@@ -162,6 +165,8 @@ class OrderManager:
         self.risk.on_api_ok()
         self.pf.add_resting(RestingOrder(oid, coid, q.ticker, q.side, q.price, q.count, exp))
         self.filled[oid] = Decimal(0)
+        self.creates += 1
+        self.last_created = q
         await self._log("create", q.ticker, q.side, q.price, q.count, q.reason)
 
     async def _amend(self, o: RestingOrder, q: DesiredQuote) -> None:
@@ -226,13 +231,61 @@ class OrderManager:
         return n
 
     def on_fill(self, msg: Mapping[str, Any]) -> None:
-        """WS `fill` message -> portfolio + per-order filled count (verified field names)."""
-        oid = str(msg.get("order_id") or "")
+        """WS `fill` -> POSITIONS only. Resting size and filled count come from the
+        `user_order` messages (absolute values), so out-of-order delivery can't
+        double-count. Until that update arrives, exposure is over- not under-stated."""
         count = Decimal(str(msg.get("count_fp") or "0"))
         price = Decimal(str(msg.get("yes_price_dollars") or "0"))
         side = str(msg.get("book_side") or "")
         fee = Decimal(str(msg.get("fee_cost") or "0"))
         if side not in ("bid", "ask") or count <= 0:
             return
-        self.filled[oid] = self.filled.get(oid, Decimal(0)) + count
-        self.pf.apply_fill(str(msg.get("market_ticker") or ""), side, price, count, fee, oid)
+        self.pf.apply_fill(str(msg.get("market_ticker") or ""), side, price, count, fee)
+
+    def on_user_order(self, msg: Mapping[str, Any]) -> str | None:
+        """WS `user_order` (verified fields: order_id, status resting|canceled|executed,
+        remaining_count_fp, fill_count_fp, last_update_reason). Returns a note when a
+        tracked order left the book."""
+        oid = str(msg.get("order_id") or "")
+        o = self.pf.resting.get(oid)
+        if o is None:
+            return None
+        if msg.get("fill_count_fp") not in (None, ""):
+            self.filled[oid] = Decimal(str(msg["fill_count_fp"]))
+        status = str(msg.get("status") or "")
+        if status in ("canceled", "executed"):
+            self.pf.remove_resting(oid)
+            return f"{o.ticker} {o.side} order {status} ({msg.get('last_update_reason') or '-'})"
+        if msg.get("remaining_count_fp") not in (None, ""):
+            o.remaining = Decimal(str(msg["remaining_count_fp"]))
+            if o.remaining <= 0:
+                self.pf.remove_resting(oid)
+        return None
+
+    async def refresh_expiries(self) -> int:
+        """Expiry-only amends (same price + total count: keeps queue priority) for orders
+        with less than expiry - refresh_seconds left. Never extends anything if trading
+        is not allowed right now: orders then die on their own (dead-man behaviour)."""
+        if not self.risk.can_trade().ok:
+            return 0
+        now = self._clock()
+        threshold = self.expiry_seconds - self.refresh_seconds
+        n = 0
+        for o in list(self.pf.resting.values()):
+            if o.expiration_time - now > threshold:
+                continue
+            exp = new_expiration(now, self.expiry_seconds)
+            total = self.filled.get(o.order_id, Decimal(0)) + o.remaining
+            self.risk.record_sent()
+            try:
+                await self.ex.amend(o, o.price, total, exp)
+            except Exception as e:
+                self.risk.on_api_error()
+                await self._log(
+                    "expiry_refresh_failed", o.ticker, o.side, o.price, o.remaining, repr(e)
+                )
+                continue
+            self.risk.on_api_ok()
+            o.expiration_time = exp
+            n += 1
+        return n

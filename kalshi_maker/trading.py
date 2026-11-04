@@ -161,6 +161,8 @@ class TradingLoop:
             return events
         can = gate_open and not self.paused and self.risk.can_trade().ok
         await self.om.sync(self.desired(books), self.grids, can)
+        if can:
+            await self.om.refresh_expiries()
         return []
 
     async def cancel_all(self, reason: str) -> int:
