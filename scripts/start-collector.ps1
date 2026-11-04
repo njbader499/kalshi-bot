@@ -11,14 +11,19 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
 $wt = Join-Path (Split-Path $repo -Parent) "kalshi-bot-collector"
 $sha = (git -C $repo rev-parse $Commit).Trim()
+if (-not $sha) { throw "unknown commit $Commit" }
 
 if (Test-Path (Join-Path $repo "KILL")) { throw "KILL file present in $repo; delete it first" }
 
+# git writes progress to stderr; under "Stop", PowerShell 5.1 would treat that as fatal.
+$ErrorActionPreference = "Continue"
 if (-not (Test-Path $wt)) {
-    git -C $repo worktree add --detach $wt $sha | Out-Null
+    git -C $repo worktree add -q --detach $wt $sha
 } else {
-    git -C $wt checkout --detach $sha 2>&1 | Out-Null
+    git -C $wt checkout -q --detach $sha
 }
+if ($LASTEXITCODE -ne 0) { throw "git could not prepare $wt at $sha" }
+$ErrorActionPreference = "Stop"
 
 # Collector config: the local config.yaml with ABSOLUTE paths into the main repo, so the
 # ledger, logs and KILL file are the ones you already use.
