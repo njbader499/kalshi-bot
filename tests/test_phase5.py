@@ -157,8 +157,11 @@ class FakeControl:
         return "ok"
 
 
-def upd(text: str, chat: str = CHAT, uid: int = 1) -> dict[str, Any]:
-    return {"update_id": uid, "message": {"chat": {"id": int(chat)}, "text": text}}
+def upd(text: str, chat: str = CHAT, uid: int = 1, date: int | None = None) -> dict[str, Any]:
+    m: dict[str, Any] = {"chat": {"id": int(chat)}, "text": text}
+    if date is not None:
+        m["date"] = date
+    return {"update_id": uid, "message": m}
 
 
 async def test_only_whitelisted_chat_is_obeyed() -> None:
@@ -383,3 +386,14 @@ def test_json_formatter_redacts_telegram_token() -> None:
     )
     out = JsonFormatter().format(rec)
     assert TOKEN not in out and "bot<redacted>" in out
+
+
+async def test_stale_commands_from_before_start_are_ignored() -> None:
+    """A /kill handled just before a restart is re-delivered by Telegram; it must not
+    kill the fresh process (seen live 2026-11-04)."""
+    fc = FakeControl()
+    r = CommandRouter(fc, CHAT, not_before=1_800_000_000.0)
+    assert await r.handle(upd("/kill", date=1_799_999_990)) is None
+    assert fc.calls == [] and r.stale == 1
+    assert await r.handle(upd("/kill", date=1_800_000_005)) == "killed"
+    assert fc.calls == ["kill"]

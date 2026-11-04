@@ -197,8 +197,15 @@ class CommandRouter:
         chat_id: str,
         clock: Callable[[], float] = time.monotonic,
         code_fn: Callable[[], str] = lambda: secrets.token_hex(3),
+        not_before: float | None = None,
     ) -> None:
         self.control = control
+        # Telegram re-delivers updates until a later getUpdates acknowledges them, so a
+        # process that stops right after /kill leaves that /kill queued for the next one.
+        # Commands sent before this process started (message.date, unix seconds) are stale
+        # and ignored. Seen live 2026-11-04: a restart re-killed itself on the old /kill.
+        self.not_before = time.time() if not_before is None else not_before
+        self.stale = 0
         self.chat_id = str(chat_id)
         self._clock = clock
         self._code_fn = code_fn
@@ -219,6 +226,11 @@ class CommandRouter:
         """Returns the reply text, or None to stay silent (unauthorized / not a command)."""
         if not self._authorized(update):
             self.ignored += 1
+            return None
+        sent_at = (update.get("message") or {}).get("date")
+        if isinstance(sent_at, int | float) and sent_at < self.not_before - 2:
+            self.stale += 1
+            log.warning("ignored stale telegram command", extra={"sent_at": sent_at})
             return None
         text = str((update.get("message") or {}).get("text") or "").strip()
         if not text.startswith("/"):
