@@ -35,6 +35,7 @@ class ReconcileReport:
     balance: str = ""
     positions: int = 0
     nonzero_positions: dict[str, str] = field(default_factory=dict)
+    positions_raw: list[dict[str, Any]] = field(default_factory=list)
     bot_resting: int = 0
     manual_resting: int = 0
     new_fills: int = 0
@@ -55,6 +56,7 @@ async def reconcile(api: Any, ledger: Ledger, now: float | None = None) -> Recon
 
     positions = [p async for p in api.iter_positions(settlement_status="unsettled", limit=1000)]
     rep.positions = await ledger.snapshot_positions(positions)
+    rep.positions_raw = [dict(p) for p in positions]
     for p in positions:
         pos = str(p.get("position_fp") or "0")
         if pos not in ("0", "0.00"):
@@ -86,5 +88,8 @@ async def reconcile(api: Any, ledger: Ledger, now: float | None = None) -> Recon
             rep.new_settlements += 1
 
     rep.took_s = round(time.monotonic() - t0, 2)
-    log.info("reconciled", extra={"report": rep.__dict__})
+    log.info(
+        "reconciled",
+        extra={"report": {k: v for k, v in rep.__dict__.items() if k != "positions_raw"}},
+    )
     return rep

@@ -218,6 +218,34 @@ class WeatherCfg(_Strict):
     settlement_check_minutes: int = Field(ge=5, le=1440)
 
 
+class TradingCfg(_Strict):
+    """Order placement (Phase 4). `trading_enabled` is the OWNER'S switch: while false, no
+    order is ever sent; the order manager runs dry and only records what it would do."""
+
+    trading_enabled: bool = False
+    order_count: Decimal = Field(gt=0, le=Decimal("100"))  # contracts per quote
+    loop_seconds: int = Field(ge=2, le=300)
+    max_fair_age_seconds: int = Field(ge=60, le=7200)
+    min_seconds_between_amends: int = Field(ge=1, le=3600)
+
+
+class TiltCfg(_Strict):
+    """Mode A (Section 3): bids only, on the side the favorite-longshot bias favors."""
+
+    edge_buffer: Decimal = Field(ge=0, le=Decimal("0.20"))
+    favorite_threshold: Decimal = Field(ge=Decimal("0.5"), lt=1)  # bid YES when fair >= this
+    longshot_threshold: Decimal = Field(gt=0, le=Decimal("0.5"))  # bid NO when fair <= this
+    min_yes_price: Decimal = Field(ge=Decimal("0.01"), le=Decimal("0.5"))
+    min_no_price: Decimal = Field(ge=Decimal("0.01"), le=Decimal("0.5"))
+    hysteresis_ticks: int = Field(ge=0, le=10)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if not self.longshot_threshold < self.favorite_threshold:
+            raise ValueError("longshot_threshold must be below favorite_threshold")
+        return self
+
+
 class Alerts(_Strict):
     """Telegram alert policy (Phase 5). Fills are batched; risk/kill/error are instant."""
 
@@ -246,6 +274,8 @@ class AppConfig(_Strict):
     safety: Safety
     markets: MarketsCfg
     weather: WeatherCfg
+    trading: TradingCfg
+    tilt: TiltCfg
     alerts: Alerts
     paths: Paths
     logging: LoggingCfg

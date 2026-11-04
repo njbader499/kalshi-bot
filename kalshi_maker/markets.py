@@ -94,5 +94,5 @@ async def discover_series_markets(
             if why:
                 rejected[m.get("ticker", "?")] = why
             else:
-                allowed.append(m)
+                allowed.append({**m, "_category": str(series.get("category") or "")})
     return allowed, rejected

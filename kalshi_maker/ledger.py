@@ -122,6 +122,18 @@ CREATE TABLE IF NOT EXISTS fair_value_snapshots (
     detail          TEXT
 );
 
+CREATE TABLE IF NOT EXISTS order_actions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at     REAL NOT NULL,
+    action          TEXT NOT NULL,      -- create|amend|cancel|rejected|*_failed|create_unknown
+    ticker          TEXT NOT NULL,
+    side            TEXT,
+    price           TEXT,
+    count           TEXT,
+    reason          TEXT,
+    dry_run         INTEGER NOT NULL    -- 1 = trading disabled: recorded, never sent
+);
+
 CREATE TABLE IF NOT EXISTS config_versions (
     sha256          TEXT PRIMARY KEY,
     first_seen      REAL NOT NULL,
@@ -144,6 +156,7 @@ APPEND_ONLY = (
     "position_snapshots",
     "balance_snapshots",
     "fair_value_snapshots",
+    "order_actions",
     "config_versions",
     "errors",
 )
@@ -404,6 +417,23 @@ class Ledger:
                 None if detail is None else _j(detail),
             ),
         )  # fmt: skip
+        await self.db.commit()
+
+    async def record_order_action(
+        self,
+        action: str,
+        ticker: str,
+        side: str,
+        price: str | None,
+        count: str | None,
+        reason: str,
+        dry_run: bool,
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO order_actions (recorded_at, action, ticker, side, price, count, reason,"
+            " dry_run) VALUES (?,?,?,?,?,?,?,?)",
+            (self._clock(), action, ticker, side, price, count, reason, 1 if dry_run else 0),
+        )
         await self.db.commit()
 
     async def record_config(self, content: str) -> str:

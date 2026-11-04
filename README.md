@@ -22,7 +22,8 @@ A maker-only (post-only limit orders, never crosses the spread) trading bot for 
 | 1 | Skeleton, settings validation, auth, read-only REST, tests | done; docs re-verified live, demo smoke test passes |
 | 1b | Windows port, V2 order endpoints, laptop-safety layer | done; live order round-trip waits on demo funds |
 | 2 | WS book + reconciliation + ledger | done, approved |
-| 3 | Weather fair value (shadow mode) | **done, awaiting review**. Logs fair vs prod prices, no orders |
+| 3 | Weather fair value (shadow mode) | done; shadow collector running |
+| 4 | Risk manager + order manager + tilt | built and tested; **trading_enabled: false** (dry runs only) |
 | 4–10 | see the spec | not started |
 
 ## Setup (Windows, PowerShell)
@@ -50,6 +51,7 @@ On Linux/macOS the equivalent is `chmod 600` on the key; the same check enforces
 ```powershell
 .\.venv\Scripts\python.exe -m kalshi_maker run              # Phase 2: live books + ledger, NO orders
 .\.venv\Scripts\python.exe -m kalshi_maker run --max-seconds 120
+.\.venv\Scripts\python.exe -m kalshi_maker risk-status      # halts / kill state
 .\.venv\Scripts\python.exe -m kalshi_maker fair             # Phase 3: fair value vs prod bid/ask (no orders)
 .\.venv\Scripts\python.exe -m kalshi_maker check-config     # validate config\config.yaml
 .\.venv\Scripts\python.exe -m kalshi_maker status           # exchange status (public)

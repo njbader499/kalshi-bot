@@ -412,6 +412,43 @@ station bias the planned per-station bias correction targets.
 - Weather fetches run as background tasks in the runner. They can never block the safety
   loop, and failures are logged to the ledger.
 
+## Phase 4 decisions (2026-11-04): risk manager, order manager, tilt (NOT enabled)
+
+- **Owner's hard switch `trading.trading_enabled: false`.** It's enforced independently in
+  three places: `LiveExecutor` refuses to be constructed, `TradingLoop` refuses a live
+  executor when the switch is off (and a dry one when it's on), and in dry mode the order
+  manager holds no API handle at all. The example config ships with it off, and a test
+  pins that.
+- **Dry mode is a full rehearsal.** The same strategy, diffing and risk limits run against
+  real demo books; every decision goes to the append-only ledger table `order_actions`
+  with `dry_run = 1`. The dry RiskManager evaluates limits *as if* trading were on, so the
+  log shows what real limits would allow. Simulated orders never fill.
+- **RiskManager** is the single gate for creates and exposure-increasing amends; cancels
+  never need it. Exposure is worst case (positions plus every resting order filled at its
+  limit). A NO buy (V2 `ask` at YES price p) costs 1 − p. Caps: order, market, event,
+  category, capital, resting count, markets quoted, orders/minute.
+- **Loss stops** use an equity proxy: realized − fees + conservative unrealized (YES at
+  best bid, NO at 1 − best ask). Daily stop → halted until the next UTC day; weekly →
+  manual resume; drawdown → KILL, cleared only by local `risk-reset --confirm`, which
+  re-bases the peak so it can't instantly re-kill. State is persisted atomically to
+  `data/risk_state.json`; an unreadable state file starts KILLED (fail safe).
+- **Tilt (Mode A)**: YES bids when fair ≥ 0.70, NO bids when fair ≤ 0.30, one tick
+  inside the best bid but never above fair − 2c and never at or through the opposite
+  side. Minimum 10c for YES and for NO. Property-tested on 400 random books. Take-profit
+  exits (optional in the spec) aren't implemented.
+- **Order manager**: keeps a quote if within `hysteresis_ticks`; amends only after
+  `min_seconds_between_amends` (20 s) because amends lose queue priority. An order of
+  unknown outcome blocks its market until reconcile. Intents are persisted before sending.
+- **Market selection**: up to `max_markets_quoted` (3). Already-quoted markets are kept
+  first (no churn), then the largest edge.
+- **Bug caught by tests:** logging `extra={"msg": ...}` collides with a LogRecord field,
+  so logging *raised* inside the risk-stop path. Fixed, and a test now scans the source
+  for reserved `extra` keys.
+- **First dry run (2026-11-04 20:58Z)**: it would have sold YES (bought NO) on Miami
+  86-87 at 0.57 because the untuned model says 11% while the prod market says about 76%.
+  That's exactly why trading stays off until the calibration report says the model is
+  trustworthy.
+
 ## Design choices (Phase 1)
 
 - **Layout.** The repo root is the spec's `kalshi_maker/` directory, and the spec's `bot/`

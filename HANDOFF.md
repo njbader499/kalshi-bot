@@ -13,7 +13,8 @@ _Last updated: 2026-11-04 (shadow collector running; calibration report built)._
 | 1b Windows port, V2 orders, laptop safety | done; **demo order round-trip passes** (place → amend expiry → cancel) |
 | 2 WS books + reconciliation + ledger | done, **approved by owner 2026-11-04** |
 | 3 Weather fair value (shadow mode) | done, approved 2026-11-04. **Shadow collector running** since 2026-11-04 20:46Z |
-| 4+ | not started |
+| 4 Risk + order manager + tilt | built and fully tested; **trading_enabled: false**, so `run` only does dry rehearsals (ledger `order_actions`, dry_run=1) |
+| 5+ | see below |
 
 Environment: owner's Windows 11 laptop in Prague (Kalshi reachable directly; never add
 VPN/proxy/geolocation workarounds). `ENV=demo`, `LOCATION_OK=false`. Demo account
@@ -92,6 +93,17 @@ the model beat the market), reliability by city, and per-station bias with a sug
 - Local ledger note: `errors` holds 126 false-positive `settlement_mismatch` rows from the
   first demo-based check, plus one `retraction` row explaining them (the table is
   append-only).
+
+## Turning trading on (owner only, after calibration)
+
+1. Run `calibrate` after 3+ settled days. Look at skill vs market (> 0?), reliability and
+   bias. Consider setting `weather.bias_f`.
+2. Review the dry log: `SELECT * FROM order_actions ORDER BY id DESC LIMIT 50` in
+   `data\ledger.db`.
+3. Set `trading.trading_enabled: true` in `config\config.yaml` (demo only; prod has its own
+   gates). Restart `run`. On startup it prints "LIVE ORDER PLACEMENT ENABLED".
+4. `risk-status` shows halts; `risk-reset --confirm` clears a KILL (local only, never via
+   Telegram).
 
 ## Open items for the owner
 

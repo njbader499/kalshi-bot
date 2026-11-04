@@ -40,6 +40,7 @@ from .power import keep_awake
 from .reconcile import ReconcileReport, reconcile
 from .rest import KalshiREST
 from .settings import Settings
+from .trading import TradingLoop, describe_mode
 from .weather.settlement import check_settlements
 from .weather.shadow import log_rows, make_engine, shadow_rows
 from .weather.sources import WeatherSources
@@ -81,6 +82,8 @@ class Runner:
         self.engine = make_engine(self.settings.config, self.weather_sources)
         self._shadow_task: asyncio.Task[None] | None = None
         self._settle_task: asyncio.Task[None] | None = None
+        self._trade_task: asyncio.Task[None] | None = None
+        self.trading = TradingLoop(self.settings.config, self.ledger, api=self.api)
         safety = self.settings.config.safety
         self.monitor = ContinuityMonitor(safety.clock_jump_seconds, safety.loop_stall_seconds)
         self.gate = SafetyGate(
@@ -96,6 +99,7 @@ class Runner:
 
     async def _cancel(self) -> object:
         res = await self.api.cancel_all_bot_orders()
+        self.trading.on_all_cancelled()  # exchange is flat on bot orders now
         if res:
             say(f"cancelled {len(res)} bot order(s)")
         return res
@@ -114,6 +118,7 @@ class Runner:
     async def _reconcile(self) -> None:
         self.last_report = await reconcile(self.api, self.ledger)
         r = self.last_report
+        self.trading.load_positions(r.positions_raw)
         say(
             f"reconciled: balance ${r.balance}, {len(r.nonzero_positions)} open position(s), "
             f"{r.manual_resting} manual resting order(s) (untouched), "
@@ -162,6 +167,8 @@ class Runner:
             kind, m = self.events.get_nowait()
             try:
                 if kind == "fill":
+                    if self.trading.live:
+                        self.trading.om.on_fill(m)
                     if await self.ledger.record_fill(m, source="ws"):
                         say(f"FILL {m.get('market_ticker')} {m.get('book_side')} "
                             f"{m.get('count_fp')} @ {m.get('yes_price_dollars')}")  # fmt: skip
@@ -177,6 +184,8 @@ class Runner:
         markets, rejected = await discover_series_markets(
             self.api, cfg.markets.weather_series, cfg.exclusions, cfg.fees
         )
+        for mk in markets:  # each market carries its series' category (risk bucket)
+            self.trading.update_markets([mk], str(mk.get("_category") or "unknown"))
         tickers = sorted(m["ticker"] for m in markets)
         say(
             f"watching {len(tickers)} market(s) in {', '.join(cfg.markets.weather_series)}"
@@ -208,6 +217,12 @@ class Runner:
             )
             n = await log_rows(self.ledger, rows)
             priced = [r for r in rows if r.fair is not None]
+            for row in priced:
+                assert row.fair is not None
+                self.trading.update_fair(
+                    row.contract.ticker, row.fair.p, row.fair.confidence,
+                    row.fair.as_of.timestamp(),
+                )  # fmt: skip
             say(f"shadow: logged {n} fair values ({len(rows) - len(priced)} not priced)")
         except Exception as e:
             log.exception("shadow pricing failed")
@@ -231,6 +246,18 @@ class Runner:
         except Exception as e:
             log.exception("settlement check failed")
             await self.ledger.record_error("settlement_check", repr(e))
+
+    async def _trade_once(self) -> None:
+        if self.ws is None:
+            return
+        try:
+            events = await self.trading.step(self.ws.books, self.gate.can_quote)
+            for e in events:
+                say(f"RISK STOP: {e} (all bot orders cancelled)")
+                await self.ledger.record_error("risk_stop", e)
+        except Exception as e:
+            log.exception("trading step failed")
+            await self.ledger.record_error("trading_step", repr(e))
 
     def _spawn(self, attr: str, coro_fn: Any) -> None:
         t = getattr(self, attr)
@@ -292,7 +319,9 @@ class Runner:
         next_discover = t_start + cfg.markets.rediscover_minutes * 60
         next_shadow = t_start + 20
         next_settle = t_start + 30
+        next_trade = t_start + 25
         tick_errors = 0
+        say(describe_mode(cfg))
         try:
             while not self.stop.is_set():
                 await asyncio.sleep(1.0)
@@ -312,6 +341,9 @@ class Runner:
                 if self.max_seconds is not None and now - t_start >= self.max_seconds:
                     say(f"--max-seconds {self.max_seconds:g} reached; stopping")
                     break
+                if now >= next_trade:
+                    next_trade = now + cfg.trading.loop_seconds
+                    self._spawn("_trade_task", self._trade_once)
                 try:
                     (
                         next_status,
@@ -374,12 +406,14 @@ class Runner:
         self.stop.set()
         if self._recovery is not None and not self._recovery.done():
             self._recovery.cancel()
+        with contextlib.suppress(Exception):
+            await self.trading.cancel_all("shutdown")
         try:
             res = await asyncio.shield(self.api.cancel_all_bot_orders())
             say(f"shutdown: cancelled {len(res)} bot order(s)")
         except Exception as e:
             say(f"shutdown: cancel bot orders FAILED ({e!r}); exchange expiry will clear them")
-        for t in (self._shadow_task, self._settle_task):
+        for t in (self._shadow_task, self._settle_task, self._trade_task):
             if t is not None and not t.done():
                 t.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -423,7 +457,7 @@ async def _run_locked(
         ):
             with keep_awake(cfg.safety.prevent_sleep) as awake:
                 say(f"sleep prevention {'ON' if awake else 'off'}; ENV={settings.env.value}; "
-                    "shadow mode: NO orders are placed")  # fmt: skip
+                    "orders: " + describe_mode(cfg))  # fmt: skip
                 runner = Runner(
                     settings,
                     api,

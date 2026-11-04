@@ -71,6 +71,23 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
 
         check_prod_gate(settings, settings.config.paths.data_dir / ".prod_confirmed")
         return await run_bot(settings, _signer(settings), args.max_seconds, args.config)
+    if cmd in ("risk-status", "risk-reset"):
+        from .risk import RiskManager
+
+        cfg = settings.config
+        rm = RiskManager(
+            cfg.risk, cfg.trading.trading_enabled, cfg.paths.data_dir / "risk_state.json"
+        )
+        if cmd == "risk-reset":
+            if not args.confirm:
+                print("refusing: pass --confirm to clear a KILL / weekly halt (local only)")
+                return 2
+            print(rm.reset_kill())
+            if rm.state.weekly_halt:
+                print(rm.resume_weekly())
+        print(_dump(rm.state.__dict__))
+        print("can trade:", rm.can_trade())
+        return 0
     if cmd == "calibrate":
         return await _calibrate(settings, args)
     if cmd == "fair":
@@ -274,6 +291,9 @@ def build_parser() -> argparse.ArgumentParser:
     ob.add_argument("--depth", type=int)
     rn = sub.add_parser("run", help="Phase 2: live books + ledger + safety (no orders)")
     rn.add_argument("--max-seconds", type=float, default=None)
+    sub.add_parser("risk-status", help="show persisted risk halts/kill state")
+    rr = sub.add_parser("risk-reset", help="clear a drawdown KILL / weekly halt (local only)")
+    rr.add_argument("--confirm", action="store_true")
     cal = sub.add_parser("calibrate", help="Phase 3 calibration report (run after 3+ days)")
     cal.add_argument("--db", type=Path, default=None, help="ledger.db (default: data_dir)")
     cal.add_argument("--min-days", type=int, default=3)

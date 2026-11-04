@@ -105,6 +105,25 @@ weather:
   fair_interval_minutes: 10
   settlement_check_minutes: 60
 
+# Order placement (Phase 4). TRADING IS OFF. The owner flips trading_enabled after reviewing
+# the calibration report. While false, the order manager runs dry: it records what it WOULD
+# do in the ledger (shadow_orders) and never sends anything to Kalshi.
+trading:
+  trading_enabled: false
+  order_count: "1"               # contracts per quote (tiny while on demo)
+  loop_seconds: 15
+  max_fair_age_seconds: 1500     # don't quote on a fair value older than this
+  min_seconds_between_amends: 20
+
+# Mode A tilt (Section 3): rest bids only on the side the bias favors.
+tilt:
+  edge_buffer: "0.02"
+  favorite_threshold: "0.70"     # bid YES when fair >= 0.70
+  longshot_threshold: "0.30"     # bid NO when fair <= 0.30
+  min_yes_price: "0.10"          # never buy YES below 10c
+  min_no_price: "0.10"           # never buy NO below 10c
+  hysteresis_ticks: 1            # don't move a quote for less than this many ticks
+
 # Alerts (Telegram arrives in Phase 5). Fills are batched; risk/kill/error alerts are instant.
 alerts:
   fill_batch_minutes: 15
