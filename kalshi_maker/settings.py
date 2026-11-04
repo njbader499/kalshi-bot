@@ -290,7 +290,8 @@ class Settings:
 def load_config(path: Path) -> AppConfig:
     if not path.exists():
         raise ConfigError(f"config file not found: {path} (copy config/config.example.yaml)")
-    raw = yaml.safe_load(path.read_text())
+    # utf-8-sig: tolerate a BOM (Windows PowerShell 5.1 writes one with -Encoding utf8)
+    raw = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise ConfigError(f"config file {path} is not a mapping")
     try:

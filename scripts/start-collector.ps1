@@ -25,11 +25,13 @@ if (-not (Test-Path $wt)) {
 $cfgSrc = Join-Path $repo "config\config.yaml"
 $cfgDst = Join-Path $repo "config\collector.yaml"
 $abs = $repo.Replace('\', '/')
-(Get-Content $cfgSrc -Raw) `
+$text = [IO.File]::ReadAllText($cfgSrc, [Text.Encoding]::UTF8) `
     -replace 'data_dir:\s*"\./data"', "data_dir: `"$abs/data`"" `
     -replace 'log_dir:\s*"\./logs"', "log_dir: `"$abs/logs`"" `
-    -replace 'kill_file:\s*"\./KILL"', "kill_file: `"$abs/KILL`"" |
-    Set-Content -Path $cfgDst -Encoding utf8
+    -replace 'kill_file:\s*"\./KILL"', "kill_file: `"$abs/KILL`""
+if ($text -notmatch [regex]::Escape("kill_file: `"$abs/KILL`"")) { throw "collector config rewrite failed" }
+# UTF-8 without BOM (Set-Content -Encoding utf8 in PowerShell 5.1 adds one).
+[IO.File]::WriteAllText($cfgDst, $text, (New-Object Text.UTF8Encoding($false)))
 
 $py = Join-Path $repo ".venv\Scripts\python.exe"
 $sup = Join-Path $wt "scripts\collector.ps1"

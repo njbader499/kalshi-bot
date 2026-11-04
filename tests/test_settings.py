@@ -169,3 +169,10 @@ def test_secrets_never_print() -> None:
     s = Secrets(_env_file=None, KALSHI_KEY_ID="abc-secret-id")  # type: ignore[call-arg]
     assert "abc-secret-id" not in repr(s)
     assert "abc-secret-id" not in str(s.model_dump())
+
+
+def test_config_with_utf8_bom_loads(tmp_path: Path, example_cfg: dict) -> None:
+    # Windows PowerShell 5.1 `Set-Content -Encoding utf8` prepends a BOM; it must not break us.
+    p = tmp_path / "bom.yaml"
+    p.write_bytes(b"\xef\xbb\xbf" + yaml.safe_dump(example_cfg, allow_unicode=True).encode("utf-8"))
+    assert load_config(p).risk.max_capital_deployed == 300
