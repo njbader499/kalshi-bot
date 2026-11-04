@@ -89,6 +89,7 @@ class WeatherEngine:
         val = (final[-1].max_f if kind == "max" else final[-1].min_f) if final else None
         if val is not None:
             detail["cli_final"] = val
+            detail["mean"] = float(val)
             return DayModel({val: 1.0}, 1.0, "cli_final", detail)
 
         conf = 1.0
@@ -172,6 +173,7 @@ class WeatherEngine:
         if days_ahead >= 2:
             conf *= 0.8
         detail["mode"] = max(dist, key=lambda k: dist[k])
+        detail["mean"] = round(sum(k * v for k, v in dist.items()), 3)
         return DayModel(dist, round(conf, 3), "ensemble+nws+obs", detail)
 
     async def price(

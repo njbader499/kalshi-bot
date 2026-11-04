@@ -69,7 +69,7 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
         from .runner import run_bot
 
         check_prod_gate(settings, settings.config.paths.data_dir / ".prod_confirmed")
-        return await run_bot(settings, _signer(settings), args.max_seconds)
+        return await run_bot(settings, _signer(settings), args.max_seconds, args.config)
     if cmd == "fair":
         return await _fair(settings, args)
     if cmd == "check-config":

@@ -33,6 +33,7 @@ from .continuity import (
     SafetyGate,
     describe_clock_offset,
 )
+from .instance_lock import AlreadyRunning, InstanceLock
 from .ledger import Ledger
 from .markets import discover_series_markets
 from .power import keep_awake
@@ -48,6 +49,9 @@ log = logging.getLogger(__name__)
 
 CLOCK_CHECK_SECONDS = 600
 SNAPSHOT_WAIT_SECONDS = 20.0
+MAX_CONSECUTIVE_TICK_ERRORS = 30
+EXIT_KILL = 10
+EXIT_ALREADY_RUNNING = 11
 
 
 def say(msg: str) -> None:
@@ -288,46 +292,83 @@ class Runner:
         next_discover = t_start + cfg.markets.rediscover_minutes * 60
         next_shadow = t_start + 20
         next_settle = t_start + 30
+        tick_errors = 0
         try:
             while not self.stop.is_set():
                 await asyncio.sleep(1.0)
                 now = time.monotonic()
+                # Safety-critical steps first, outside the error-tolerant block.
                 for d in self.monitor.tick():
                     say(f"discontinuity: {d.cause.value} ({d.detail})")
                     self.gate.trip(d)
                 if self.kill_file.exists():
                     say(f"KILL file found at {self.kill_file}; cancelling bot orders and stopping")
-                    self.exit_code = 10
+                    self.exit_code = EXIT_KILL
                     break
                 if self.gate.state is not GateState.RUNNING and (
                     self._recovery is None or self._recovery.done()
                 ):
                     self._recovery = asyncio.create_task(self.gate.recover(), name="recovery")
-                await self._drain_events()
-                if now >= next_status:
-                    say(self._status_line())
-                    next_status = now + cfg.markets.status_log_seconds
-                if now >= next_clock:
-                    await self._clock_check()
-                    next_clock = now + CLOCK_CHECK_SECONDS
-                if now >= next_discover:
-                    next_discover = now + cfg.markets.rediscover_minutes * 60
-                    new = await self._discover()
-                    if new and self.ws and new != sorted(self.ws.books):
-                        say("market set changed; restarting websocket")
-                        await self._start_ws(new)
-                if now >= next_shadow:
-                    self._spawn("_shadow_task", self._shadow_once)
-                    next_shadow = now + cfg.weather.fair_interval_minutes * 60
-                if now >= next_settle:
-                    self._spawn("_settle_task", self._settlement_once)
-                    next_settle = now + cfg.weather.settlement_check_minutes * 60
                 if self.max_seconds is not None and now - t_start >= self.max_seconds:
                     say(f"--max-seconds {self.max_seconds:g} reached; stopping")
                     break
+                try:
+                    (
+                        next_status,
+                        next_clock,
+                        next_discover,
+                        next_shadow,
+                        next_settle,
+                    ) = await self._housekeeping(
+                        now, next_status, next_clock, next_discover, next_shadow, next_settle
+                    )
+                    tick_errors = 0
+                except Exception as e:
+                    # One flaky API call must not kill a long-running collector. Many in a
+                    # row means something is really wrong: exit non-zero so the supervisor
+                    # restarts the process cleanly.
+                    tick_errors += 1
+                    log.exception("housekeeping failed")
+                    with contextlib.suppress(Exception):
+                        await self.ledger.record_error("housekeeping", repr(e))
+                    if tick_errors >= MAX_CONSECUTIVE_TICK_ERRORS:
+                        say(f"{tick_errors} consecutive loop errors; exiting for a clean restart")
+                        self.exit_code = 1
+                        break
         finally:
             await self.shutdown()
         return self.exit_code
+
+    async def _housekeeping(
+        self,
+        now: float,
+        next_status: float,
+        next_clock: float,
+        next_discover: float,
+        next_shadow: float,
+        next_settle: float,
+    ) -> tuple[float, float, float, float, float]:
+        cfg = self.settings.config
+        await self._drain_events()
+        if now >= next_status:
+            next_status = now + cfg.markets.status_log_seconds
+            say(self._status_line())
+        if now >= next_clock:
+            next_clock = now + CLOCK_CHECK_SECONDS
+            await self._clock_check()
+        if now >= next_shadow:
+            next_shadow = now + cfg.weather.fair_interval_minutes * 60
+            self._spawn("_shadow_task", self._shadow_once)
+        if now >= next_settle:
+            next_settle = now + cfg.weather.settlement_check_minutes * 60
+            self._spawn("_settle_task", self._settlement_once)
+        if now >= next_discover:
+            next_discover = now + cfg.markets.rediscover_minutes * 60  # even on failure
+            new = await self._discover()
+            if new and self.ws and new != sorted(self.ws.books):
+                say("market set changed; restarting websocket")
+                await self._start_ws(new)
+        return next_status, next_clock, next_discover, next_shadow, next_settle
 
     async def shutdown(self) -> None:
         self.stop.set()
@@ -348,13 +389,33 @@ class Runner:
         await self.weather_sources.aclose()
 
 
-async def run_bot(settings: Settings, signer: Signer, max_seconds: float | None) -> int:
+async def run_bot(
+    settings: Settings,
+    signer: Signer,
+    max_seconds: float | None,
+    config_path: Path = Path("config/config.yaml"),
+) -> int:
+    cfg = settings.config
+    lock = InstanceLock(cfg.paths.data_dir / "run.lock")
+    try:
+        lock.acquire()
+    except AlreadyRunning as e:
+        say(f"{e}; refusing to start a second bot")
+        return EXIT_ALREADY_RUNNING
+    try:
+        return await _run_locked(settings, signer, max_seconds, config_path)
+    finally:
+        lock.release()
+
+
+async def _run_locked(
+    settings: Settings, signer: Signer, max_seconds: float | None, config_path: Path
+) -> int:
     cfg = settings.config
     ledger = await Ledger.open(cfg.paths.data_dir / "ledger.db")
     try:
-        cfg_path = Path("config/config.yaml")
-        if cfg_path.exists():
-            await ledger.record_config(cfg_path.read_text(encoding="utf-8"))
+        if config_path.exists():
+            await ledger.record_config(config_path.read_text(encoding="utf-8"))
         prod_public = KalshiREST(cfg.hosts.prod.rest, cfg.rate_limits)  # no signer: public
         async with (
             KalshiREST(settings.hosts.rest, cfg.rate_limits, signer=signer) as api,
