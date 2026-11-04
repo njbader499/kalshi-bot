@@ -3,7 +3,7 @@
 Current state of the Kalshi maker bot, for whoever picks this up next (human or Claude).
 Spec: `KALSHI_MAKER_BOT_PROMPT.md`. Every decision and doc conflict: `DECISIONS.md`.
 
-_Last updated: 2026-11-04._
+_Last updated: 2026-11-04 (Phase 3 paused on settlement wording)._
 
 ## Where things stand
 
@@ -12,7 +12,7 @@ _Last updated: 2026-11-04._
 | 1 Skeleton, auth, read-only REST | done, verified live on demo |
 | 1b Windows port, V2 orders, laptop safety | done; **demo order round-trip passes** (place → amend expiry → cancel) |
 | 2 WS books + reconciliation + ledger | done, **approved by owner 2026-11-04** |
-| 3 Weather fair value (shadow mode) | in progress |
+| 3 Weather fair value (shadow mode) | **paused**: settlement wording ambiguous; owner decision needed (below) |
 | 4+ | not started |
 
 Environment: owner's Windows 11 laptop in Prague (Kalshi reachable directly; never add
@@ -45,6 +45,23 @@ to start otherwise. Never print or log key contents.
 - Settlement source must come from the API rules text, never memory. Stop and ask if it's
   ambiguous.
 - Commit and push after each milestone; stop for review at the end of each phase.
+
+## Blocking decision for Phase 3 (asked 2026-11-04)
+
+Settlement rules were pulled from the API and quoted verbatim in DECISIONS.md ("Weather
+settlement rules: exact wording"). Source = The Weather Company for all three series;
+stations = NWS CLI Central Park / Miami / Chicago-Midway. Three things are not stated:
+(1) the precision of the final value (the brackets only work for integers), (2) the day
+window (the text says 11:59 PM local, but close_time is 1:00 AM local standard), and (3)
+whether TWC republishes the NWS CLI value. Proposed handling, awaiting the owner's answer:
+
+1. Model the settlement value as an integer °F (the strikes, subtitles and CLI reports all
+   imply it). Log any settlement that contradicts this.
+2. Use the NWS CLI day (local standard time). It equals the calendar day until DST resumes on
+   2027-03-14; revisit before then.
+3. Use the NWS CLI report + NWS observations as the proxy for TWC's number. After each
+   settlement, compare Kalshi's result with the CLI value and auto-flag any disagreement.
+   Don't scrape weather.com's undocumented backend unless the owner asks.
 
 ## Open items for the owner
 

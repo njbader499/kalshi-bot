@@ -92,18 +92,116 @@ Direction on responses uses `outcome_side` (yes/no) and `book_side` (bid/ask). T
   `fee_multiplier`. Unknown types are refused. All active daily weather series are
   `quadratic` ×1, so makers pay 0.
 
-### Weather settlement source (spec conflict, matters for Phase 3)
+### Weather settlement rules: exact wording (pulled from the API 2026-11-04)
 
-The spec says weather settles on the NWS Daily Climate Report (CLI). **The live market rules
-say otherwise.** Example (KXLOWTSATX, 2026-11-05): *"…the minimum temperature recorded at
-San Antonio (CLISAT)… according to **The Weather Company**"*, and the series'
-`settlement_sources` = The Weather Company (weather.com/kalshi). Rules warn that preliminary
-values may differ by rounding/conversion, and an erroneous publication can delay expiry.
-The NWS-sourced series (KXLOWNY, KXLOWCHI, KXHIGHHOU…) have **no open markets**. Phase 3
-must model The Weather Company's reported integer for the named station, and parse the
-source from each market's rules rather than assuming it. NWS/Open-Meteo remain *inputs*
-to the forecast. The CLI "climate day" DST rule needs re-checking against TWC's definition
-before it's coded. **I'll raise this at the Phase 3 start.**
+Pulled with `GET /series/{t}` and `GET /markets?series_ticker={t}&status=open` on **prod and
+demo** for KXHIGHNY, KXHIGHMIA and KXHIGHCHI. All 72 open markets (3 series x 2 envs) share
+one template, with one `rules_secondary` text and identical series metadata. Demo matches
+prod exactly.
+
+**Series metadata (all three):**
+`settlement_sources = [{"name": "The Weather Company", "url": "https://weather.com/kalshi"}]`,
+`contract_terms_url = https://assets.kalshi.com/contract_terms/GLOBALTEMPERATURE.pdf`,
+`fee_type = "quadratic"`, `fee_multiplier = 1`, `frequency = "daily"`.
+
+**`rules_primary`, verbatim (KXHIGHNY, 2026-11-04 markets):**
+
+> [greater, floor 77] "If the maximum temperature recorded at New York City (CLINYC) for Nov 4,
+> 2026, is greater than 77° fahrenheit according to The Weather Company, then the market
+> resolves to Yes."  (`yes_sub_title`: "78° or above")
+>
+> [less, cap 70] "If the maximum temperature recorded at New York City (CLINYC) for Nov 4,
+> 2026, is less than 70° fahrenheit according to The Weather Company, then the market
+> resolves to Yes."  (`yes_sub_title`: "69° or below")
+>
+> [between, 70-71] "If the maximum temperature recorded at New York City (CLINYC) for Nov 4,
+> 2026, is between 70-71° fahrenheit according to The Weather Company, then the market
+> resolves to Yes."  (`yes_sub_title`: "70° to 71°")
+
+Miami and Chicago are identical except for the station: "Miami (CLIMIA)", "Chicago (CLIMDW)".
+
+**`rules_secondary`, verbatim (all markets):**
+
+> "Not all weather data is the same. While checking a source like AccuWeather or Google
+> Weather may help guide your decision, the official and final value used to determine this
+> market is the maximum/minimum temperature as reported by the Weather Company.
+>
+> Reading weather data
+> Preliminary Weather Company data may be subject to rounding and conversion differences from
+> the final reported value.
+> Use caution when interpreting preliminary Weather Company readings.
+>
+> If it is determined in the sole discretion of the Exchange that there is a material error in
+> the initial non-preliminary publication, Expiration may be held until the publication of a
+> non-materially-erroneous data revision or until the Expiration Date, whichever comes first.
+> If no data is available at the end of this period, all markets will resolve to the last fair
+> price determined by Kalshi. Please note, a status of "Final" on weather.com/kalshi is
+> provided for convenience only, and does not guarantee data to be error-free and thus exempt
+> from the above."
+
+**`early_close_condition` (sample KXHIGHNY-26NOV05-T77):**
+
+> "The Last Trading Time will be 11:59 PM local time on November 05, 2026 regardless of any
+> data releases or events occurring. Expiration will occur on the sooner of the first 7:00 or
+> 8:00 AM ET following the release of the data for November 05, 2026, or one week after
+> November 05, 2026."
+
+API timing fields for that market: `close_time 2026-11-06T06:00:00Z` (NY, MIA) /
+`07:00:00Z` (CHI), `expected_expiration_time 2026-11-06T20:00:00Z`,
+`latest_expiration_time 2026-11-12T15:00:00Z`.
+
+**Contract terms PDF (GLOBALTEMPERATURE, linked from the series), relevant clauses verbatim:**
+
+> "Source Agency: The Source Agencies are, in hierarchical order, The Weather Company (TWC),
+> National Weather Service, the national weather service for <area> ..."
+>
+> "'Above' means greater than (>), 'below' means less than (<), ... and 'between' means within
+> an inclusive range (≥ lower bound and ≤ upper bound)."
+>
+> "<measurement units>: ... Where relevant, such units may be defined or rounded to one decimal
+> place."
+>
+> "Only the first official non-preliminary report published by the Source Agencies that
+> includes the relevant data will be used for resolution ..."
+>
+> "Contract resolution is based on the full precision reported by the Source Agency. Rounding
+> by media outlets, secondary reporting, or third-party summaries does not affect resolution."
+>
+> "Last Trading Date: ... the final day of <time period>. The Last Trading Time will be one
+> minute prior to the final time in <time period>."
+
+**Station codes, confirmed via api.weather.gov (not memory):** `CLINYC`, `CLIMIA`, `CLIMDW`
+are the NWS Daily Climate Report product IDs for **Central Park NY** (office OKX), **Miami**
+(MFL) and **Chicago-Midway** (LOT; *not* O'Hare). Those reports give the daily max as an
+**integer °F** with times labelled **(LST)**. `weather.com/kalshi` is a JavaScript app titled
+"Official Climate Reports: verified climate observations from official government climate
+stations" with a "Daily Climate" tab. It has no documented API.
+
+### OPEN: settlement-wording ambiguities (stopped for the owner, 2026-11-04)
+
+What is clear: the source is The Weather Company (NWS second in the hierarchy). The
+stations are the NWS CLI stations above. "greater than X" is strictly > X, "less than X" is
+strictly < X, and "between A-B" is inclusive. Demo and prod agree.
+
+What is NOT stated anywhere in the API text or the contract terms:
+
+1. **Precision of the reported value.** "Full precision reported by the Source Agency" plus
+   "may be ... rounded to one decimal place", but the strikes only partition **integers**.
+   Checked on every 2026-11-05 event: each integer hits exactly one bracket, while 71.5,
+   73.5 and 75.5 (NY), 83.5/85.5/87.5 (MIA) and 56.5/58.5/60.5 (CHI) hit **no** bracket. The
+   `yes_sub_title`s ("78° or above" for "greater than 77°") also assume integers. The NWS CLI
+   reports are integers. TWC's final precision is not stated.
+2. **The day window behind "for Nov 4, 2026".** Not defined. The NWS CLI "day" is local
+   standard time (during DST, 1:00 AM to 12:59 AM local daylight time). The text says trading
+   ends "11:59 PM local time", but the API `close_time` is **1:00 AM local standard time**
+   (06:00Z for EST, 07:00Z for CST). Today (standard time until 2027-03-14) the LST day and
+   the local calendar day coincide, so this only matters from March.
+3. **Which number TWC publishes.** Is TWC's "Daily Climate" value the NWS CLI value
+   republished, or TWC's own observation for the same station? The page says "official
+   government climate stations", which suggests the former, but it isn't stated, and the
+   data feed is undocumented.
+
+Phase 3 is paused on these. See HANDOFF.md for the proposed handling.
 
 ### Live demo results (2026-11-04, authenticated)
 
