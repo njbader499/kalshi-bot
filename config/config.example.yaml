@@ -111,6 +111,8 @@ weather:
 trading:
   trading_enabled: false
   order_count: "1"               # contracts per quote (tiny while on demo)
+  edge_full_size: "0.12"        # size scales with edge: 1 contract at the 2c buffer, up to max_order_cost at 12c edge
+  count_hysteresis_pct: 25       # only resize a resting quote on a >= 25% change
   loop_seconds: 15
   max_fair_age_seconds: 1500     # don't quote on a fair value older than this
   min_seconds_between_amends: 20
@@ -128,6 +130,8 @@ tilt:
 alerts:
   fill_batch_minutes: 15
   instant_kinds: ["risk", "kill", "error"]
+  daily_summary_time: "08:00"   # daily P&L summary (local time below)
+  daily_summary_tz: "Europe/Prague"
 
 paths:
   data_dir: "./data"

@@ -18,7 +18,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
 from .book import OrderBook
@@ -28,7 +28,7 @@ from .orders import DryRunExecutor, Executor, LiveExecutor, OrderManager
 from .portfolio import MarketMeta, PortfolioState, Position
 from .rest import KalshiREST
 from .risk import RiskManager
-from .settings import AppConfig
+from .settings import AppConfig, RiskLimits
 from .strategy.tilt import DesiredQuote, MarketView, tilt_quote
 
 log = logging.getLogger(__name__)
@@ -43,6 +43,37 @@ class FairInput:
 
 def edge(q: DesiredQuote, fair: Decimal) -> Decimal:
     return fair - q.price if q.side == "bid" else q.price - fair
+
+
+def room_for(pf: PortfolioState, ticker: str, limits: RiskLimits) -> Decimal:
+    """Worst-case $ room for a new/replacement quote in `ticker`: the tightest of every cap,
+    measured WITHOUT this market's own resting orders (they get replaced or amended)."""
+    own = sum((o.cost for o in pf.resting_for(ticker)), Decimal(0))
+    meta = pf.meta[ticker]
+    return min(
+        limits.max_order_cost,
+        limits.max_cost_per_market - (pf.market_exposure(ticker) - own),
+        limits.max_cost_per_event - (pf.event_exposure(meta.event) - own),
+        limits.max_cost_per_category - (pf.category_exposure(meta.category) - own),
+        limits.max_capital_deployed - (pf.total_exposure() - own),
+    )
+
+
+def size_quote(
+    q: DesiredQuote, fair: Decimal, buffer: Decimal, edge_full: Decimal, min_count: Decimal,
+    max_order_cost: Decimal, room: Decimal,
+) -> Decimal:  # fmt: skip
+    """Whole contracts: min_count at edge == buffer, scaling linearly to max_order_cost at
+    edge >= edge_full, clipped to `room`. 0 means 'can't afford even one'."""
+    unit = q.price if q.side == "bid" else 1 - q.price
+    if unit <= 0:
+        return Decimal(0)
+    target = min_count * unit
+    if edge_full > buffer:
+        frac = min(Decimal(1), max(Decimal(0), (edge(q, fair) - buffer) / (edge_full - buffer)))
+        target = max(target, max_order_cost * frac)
+    target = min(target, max_order_cost, room)
+    return (target / unit).to_integral_value(rounding=ROUND_FLOOR)
 
 
 class TradingLoop:
@@ -139,8 +170,16 @@ class TradingLoop:
                 continue
             v = MarketView(t, f.p, f.confidence, b.best_yes_bid, b.best_yes_ask, grid)
             q = tilt_quote(v, self.cfg.tilt, t_cfg.order_count, self.cfg.weather.min_confidence)
-            if q is not None and edge(q, f.p) > 0:
-                cands.append((t in self.pf.quoted_markets(), edge(q, f.p), q))
+            if q is None or edge(q, f.p) <= 0:
+                continue
+            n = size_quote(
+                q, f.p, self.cfg.tilt.edge_buffer, t_cfg.edge_full_size, t_cfg.order_count,
+                self.cfg.risk.max_order_cost, room_for(self.pf, t, self.cfg.risk),
+            )  # fmt: skip
+            if n < 1:
+                continue  # no room under the caps for even one contract
+            q = DesiredQuote(q.ticker, q.side, q.price, n, q.reason + f" edge={edge(q, f.p)}")
+            cands.append((t in self.pf.quoted_markets(), edge(q, f.p), q))
         cands.sort(key=lambda c: (not c[0], -c[1], c[2].ticker))
         chosen = {c[2].ticker: c[2] for c in cands[: self.cfg.risk.max_markets_quoted]}
         out: dict[str, DesiredQuote | None] = {t: None for t in self.fairs}

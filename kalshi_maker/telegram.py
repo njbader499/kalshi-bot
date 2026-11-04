@@ -132,7 +132,7 @@ class Notifier:
     def __post_init__(self) -> None:
         self._last_digest = self.clock()
 
-    ALWAYS_INSTANT = frozenset({"reply", "lifecycle"})  # command replies, start/stop
+    ALWAYS_INSTANT = frozenset({"reply", "lifecycle", "summary"})  # replies, start/stop, daily
 
     def alert(self, kind: str, text: str) -> None:
         instant = kind in self.instant_kinds or kind in self.ALWAYS_INSTANT
@@ -162,7 +162,10 @@ class Notifier:
         due = self.clock() - self._last_digest >= self.batch_seconds
         if self._digest and (due or force_digest):
             items = list(self._digest)
-            body = f"Digest ({len(items)}):\n" + "\n".join(items)
+            n_fills = sum(1 for i in items if i.startswith("[FILL]"))
+            body = f"15-min digest: {n_fills} fill(s), {len(items) - n_fills} other\n" + "\n".join(
+                items
+            )
             if await self._send(body):
                 self._digest.clear()
                 self._last_digest = self.clock()

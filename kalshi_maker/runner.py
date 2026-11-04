@@ -34,6 +34,7 @@ from .continuity import (
     SafetyGate,
     describe_clock_offset,
 )
+from .daily import build_text, due, ledger_counts, load_state, save_state
 from .instance_lock import AlreadyRunning, InstanceLock
 from .killswitch import install_signal_kill, write_kill_file
 from .ledger import Ledger
@@ -91,6 +92,8 @@ class Runner:
         self._trade_task: asyncio.Task[None] | None = None
         self._notify_task: asyncio.Task[None] | None = None
         self._first_order_alerted = False
+        self._summary_task: asyncio.Task[None] | None = None
+        self.last_settle_text = "not run yet"
         self._poll_task: asyncio.Task[None] | None = None
         if self.notifier is None:  # no Telegram configured: alerts go nowhere
             self.notifier = Notifier(None, frozenset(), 3600)
@@ -332,6 +335,9 @@ class Runner:
             chk = await check_settlements(
                 prod, self.weather_sources, self.settings.config.markets.weather_series
             )
+            self.last_settle_text = (
+                f"{chk.agreed}/{chk.checked} agree, {len(chk.mismatches)} mismatch (last 8 days)"
+            )
             for mm in chk.mismatches:
                 self.alert("error", f"SETTLEMENT MISMATCH vs NWS CLI: {mm}")
                 await self.ledger.record_error("settlement_mismatch", mm)
@@ -374,6 +380,45 @@ class Runner:
             return lambda: 0  # dry mode: nothing on the exchange to cancel
         rest_url, signer = self.settings.hosts.rest, self.signer
         return lambda: sync_cancel_bot_orders(rest_url, signer)
+
+    def _summary_state_path(self) -> Path:
+        return self.settings.config.paths.data_dir / "daily_summary.json"
+
+    def _summary_due(self) -> bool:
+        a = self.settings.config.alerts
+        st = load_state(self._summary_state_path())
+        return (
+            due(datetime.now(UTC), a.daily_summary_time, a.daily_summary_tz, st.last_date)
+            is not None
+        )
+
+    async def _daily_once(self) -> None:
+        a = self.settings.config.alerts
+        path = self._summary_state_path()
+        st = load_state(path)
+        day = due(datetime.now(UTC), a.daily_summary_time, a.daily_summary_tz, st.last_date)
+        if day is None:
+            return
+        try:
+            bal = await self.api.get_balance()
+            pv = bal.portfolio_value or Decimal(0)
+            equity = bal.balance + pv
+            counts = await ledger_counts(self.ledger, time.time() - 86400)
+            pf = self.trading.pf
+            text = build_text(
+                day, self.settings.env.value, equity, bal.balance, pv,
+                Decimal(st.last_equity) if st.last_equity else None, counts,
+                sum(1 for p in pf.positions.values() if p.qty != 0), pf.total_exposure(),
+                self.settings.config.risk.max_capital_deployed,
+                self.trading.risk.can_trade().reason or "ok (no halts)",
+                self.last_settle_text,
+            )  # fmt: skip
+        except Exception as e:
+            log.exception("daily summary failed")
+            await self.ledger.record_error("daily_summary", repr(e))
+            return  # retried on a later tick
+        self.alert("summary", text)
+        save_state(path, type(st)(last_date=day.isoformat(), last_equity=str(equity)))
 
     def _spawn(self, attr: str, coro_fn: Any) -> None:
         t = getattr(self, attr)
@@ -522,6 +567,8 @@ class Runner:
     ) -> tuple[float, float, float, float, float]:
         cfg = self.settings.config
         await self._drain_events()
+        if self._summary_due():
+            self._spawn("_summary_task", self._daily_once)
         if now >= next_status:
             next_status = now + cfg.markets.status_log_seconds
             say(self._status_line())
@@ -557,6 +604,7 @@ class Runner:
             self.watchdog.stop()
         for t in (
             self._shadow_task, self._settle_task, self._trade_task, self._poll_task,
+            self._summary_task,
             self._notify_task,
         ):  # fmt: skip
             if t is not None and not t.done():

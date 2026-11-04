@@ -223,7 +223,12 @@ class TradingCfg(_Strict):
     order is ever sent; the order manager runs dry and only records what it would do."""
 
     trading_enabled: bool = False
-    order_count: Decimal = Field(gt=0, le=Decimal("100"))  # contracts per quote
+    order_count: Decimal = Field(gt=0, le=Decimal("100"))  # MINIMUM contracts per quote
+    # Edge-scaled size: at edge == tilt.edge_buffer a quote is order_count contracts; it
+    # grows linearly to risk.max_order_cost at edge >= edge_full_size, then is clipped to
+    # the remaining worst-case room under every risk cap. 0 disables scaling.
+    edge_full_size: Decimal = Field(default=Decimal("0"), ge=0, le=Decimal("0.5"))
+    count_hysteresis_pct: int = Field(default=25, ge=0, le=100)  # resize only on >= this change
     loop_seconds: int = Field(ge=2, le=300)
     max_fair_age_seconds: int = Field(ge=60, le=7200)
     min_seconds_between_amends: int = Field(ge=1, le=3600)
@@ -251,6 +256,19 @@ class Alerts(_Strict):
 
     fill_batch_minutes: int = Field(ge=1, le=1440)
     instant_kinds: list[str] = Field(default_factory=lambda: ["risk", "kill", "error"])
+    daily_summary_time: str = Field(default="08:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    daily_summary_tz: str = "Europe/Prague"
+
+    @field_validator("daily_summary_tz")
+    @classmethod
+    def _tz_exists(cls, v: str) -> str:
+        from zoneinfo import ZoneInfo
+
+        try:
+            ZoneInfo(v)
+        except Exception as e:  # ZoneInfoNotFoundError is a KeyError: pydantic won't wrap it
+            raise ValueError(f"unknown time zone {v!r}") from e
+        return v
 
 
 class Paths(_Strict):

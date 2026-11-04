@@ -63,7 +63,11 @@ async def test_instant_kinds_go_now_fills_are_batched() -> None:
     assert s.msgs == ["[RISK] daily stop"]
     c.t += 901
     await n.flush()
-    assert len(s.msgs) == 2 and s.msgs[1].startswith("Digest (2):") and "B ask" in s.msgs[1]
+    assert (
+        len(s.msgs) == 2
+        and s.msgs[1].startswith("15-min digest: 2 fill(s)")
+        and "B ask" in s.msgs[1]
+    )
 
 
 async def test_lifecycle_and_replies_always_instant() -> None:

@@ -50,9 +50,12 @@ to start otherwise. Never print or log key contents.
 
 ## Current live state (2026-11-04 21:50Z)
 
-- The bot runs **live on DEMO** under the supervisor, pinned to `a8a327e`.
+- The bot runs **live on DEMO** under the supervisor (pinned commit: see the supervisor log).
+  Since ~22:00Z: **8 cities** (NYC, MIA, CHI, LAX, ATL, BOS, DFW, DEN), **max 10 markets**,
+  edge-scaled size up to the $15 per-order cap; all risk limits unchanged. Telegram: 15-min
+  fill digest + daily summary 08:00 Prague.
   `ENV=demo`, `LOCATION_OK=false`, `I_ACCEPT_REAL_MONEY_RISK=false`; the prod gate is
-  untouched. Tilt only, 1 contract per quote, max 3 markets, risk limits as configured.
+  untouched. Tilt only; risk limits as configured (the category cap $150 binds first).
 - First demo orders 21:36Z; first fill: KXHIGHMIA-26NOV05-B88.5, 1 NO @ 0.89 (maker, no
   fee). Balance $499.11.
 - Kill switch verified live: the KILL file (21:36Z) and Telegram /kill (21:44Z) both left 0

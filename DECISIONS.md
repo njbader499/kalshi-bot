@@ -478,6 +478,48 @@ station bias the planned per-station bias correction targets.
   deleting the file isn't enough: `risk-reset --confirm` is needed. Ctrl+C is a graceful
   stop that still cancels bot orders.
 
+## More demo activity (owner, 2026-11-04 ~22:00Z)
+
+The owner treats the $500 demo bankroll exactly like real money: **every risk limit
+unchanged** (order $15, market $50, event $75, category $150, deployed $300, daily $25,
+weekly $60, drawdown $100), and edge and confidence filters unchanged. Changes:
+
+- `max_markets_quoted` 3 → **10** (local config.yaml; the committed example keeps 3).
+- **Five more cities**, the top 5 daily-high series by prod 24h volume. Each was vetted
+  like NYC/MIA/CHI: every open prod market matches the verified rules template (TWC
+  source, one station code, strikes and subtitles consistent), `rules_secondary` is
+  identical to NYC's, `settlement_sources` and contract terms are identical, NWS confirms
+  the CLI product (header + name), and NWS station metadata gives the coordinates and time
+  zone. Then the proxy was checked on real settlements: **210/210** prod markets over the
+  prior week agree with the NWS CLI.
+
+  | Series | 24h vol | Rules station | NWS CLI name | Obs | TZ (LST offset) |
+  |---|---|---|---|---|---|
+  | KXHIGHLAX | 153k | CLILAX | LOS ANGELES INTL AIRPORT CA | KLAX | Los_Angeles (−8) |
+  | KXHIGHTATL | 39k | CLIATL | ATLANTA | KATL | New_York (−5) |
+  | KXHIGHTBOS | 32k | CLIBOS | BOSTON MA | KBOS | New_York (−5) |
+  | KXHIGHTDAL | 31k | CLIDFW | DALLAS/FORT WORTH | KDFW | Chicago (−6) |
+  | KXHIGHDEN | 31k | CLIDEN | DENVER CO | KDEN | Denver (−7) |
+
+  The next five (OKC, PHX, NOLA, LV, SFO) also passed, but weren't added (owner asked for at
+  most 5). Note: all weather series share one category, so **the $150 category cap, not the
+  $300 deployed cap, is the binding limit** on total weather exposure.
+- **Edge-scaled size** (`trading.edge_full_size: 0.12`): 1 contract at the 2c buffer,
+  rising linearly to the $15 per-order cap at 12c of edge. Each quote is clipped to the
+  tightest remaining worst-case room under the market, event, category and deployed caps
+  (excluding that market's own resting order, which gets replaced). Zero room means no
+  quote. The RiskManager still re-checks every create and amend. Resting quotes are only
+  resized on a ≥ 25% change (`count_hysteresis_pct`) to avoid churn.
+- **Telegram**: fills go into a 15-minute digest ("15-min digest: N fill(s)…"); a **daily
+  summary at 08:00 Europe/Prague** (DST-aware, catches up after downtime, never sent twice;
+  state in `data/daily_summary.json`). The summary shows equity (balance + Kalshi
+  portfolio value), the change since the last summary, 24 h fills/contracts/fees/orders/
+  settlements, open positions, worst-case exposure vs cap, risk status, and the latest
+  settlement check.
+- Bug caught by tests: an unknown time zone raised `ZoneInfoNotFoundError` (a KeyError),
+  which pydantic doesn't wrap, so a typo would have crashed startup instead of being
+  refused. It now raises a clean config error.
+
 ## Design choices (Phase 1)
 
 - **Layout.** The repo root is the spec's `kalshi_maker/` directory, and the spec's `bot/`

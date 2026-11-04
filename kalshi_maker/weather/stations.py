@@ -45,8 +45,41 @@ STATIONS: dict[str, Station] = {
         "CLIMDW", "MDW", "LOT", "Chicago-Midway", "KMDW",
         41.78417, -87.75528, "America/Chicago", -6,
     ),
+    # Added 2026-11-04 (owner asked for up to 5 more liquid cities). Each verified the same
+    # way: rules template + TWC source + one station code on every open prod market,
+    # rules_secondary identical to NYC's, NWS CLI product header/name, and NWS station
+    # metadata (coordinates, time zone) from api.weather.gov/stations/{id}.
+    "CLILAX": Station(
+        "CLILAX", "LAX", "LOX", "Los Angeles Intl Airport", "KLAX",
+        33.93806, -118.38889, "America/Los_Angeles", -8,
+    ),
+    "CLIATL": Station(
+        "CLIATL", "ATL", "FFC", "Atlanta", "KATL",
+        33.64028, -84.42694, "America/New_York", -5,
+    ),
+    "CLIBOS": Station(
+        "CLIBOS", "BOS", "BOX", "Boston MA", "KBOS",
+        42.36056, -71.01056, "America/New_York", -5,
+    ),
+    "CLIDFW": Station(
+        "CLIDFW", "DFW", "FWD", "Dallas/Fort Worth", "KDFW",
+        32.89743, -97.02196, "America/Chicago", -6,
+    ),
+    "CLIDEN": Station(
+        "CLIDEN", "DEN", "BOU", "Denver CO", "KDEN",
+        39.84658, -104.65622, "America/Denver", -7,
+    ),
 }  # fmt: skip
 
 # Which station each series is expected to name (cross-checked against the rules text at
 # parse time; a series that suddenly names a different station is refused).
-SERIES_STATION = {"KXHIGHNY": "CLINYC", "KXHIGHMIA": "CLIMIA", "KXHIGHCHI": "CLIMDW"}
+SERIES_STATION = {
+    "KXHIGHNY": "CLINYC",
+    "KXHIGHMIA": "CLIMIA",
+    "KXHIGHCHI": "CLIMDW",
+    "KXHIGHLAX": "CLILAX",
+    "KXHIGHTATL": "CLIATL",
+    "KXHIGHTBOS": "CLIBOS",
+    "KXHIGHTDAL": "CLIDFW",
+    "KXHIGHDEN": "CLIDEN",
+}

@@ -34,7 +34,10 @@ from typing import Any
 from .contracts import RulesError, climate_day_window, parse_contract
 
 LEAD_BUCKETS = ("same-day", "day-ahead", "2+ days")
-CITY = {"CLINYC": "NYC", "CLIMIA": "Miami", "CLIMDW": "Chicago"}
+CITY = {
+    "CLINYC": "NYC", "CLIMIA": "Miami", "CLIMDW": "Chicago", "CLILAX": "LA",
+    "CLIATL": "Atlanta", "CLIBOS": "Boston", "CLIDFW": "Dallas", "CLIDEN": "Denver",
+}  # fmt: skip
 
 
 @dataclass(frozen=True, slots=True)

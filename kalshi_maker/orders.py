@@ -220,7 +220,10 @@ class OrderManager:
             o = same[0]
             tick = grid.tick_at(o.price)
             moved = abs(want.price - o.price)
-            if moved >= tick * max(1, self.tilt.hysteresis_ticks) or o.remaining != want.count:
+            resize = abs(want.count - o.remaining)
+            pct = Decimal(self.trading.count_hysteresis_pct) / 100
+            big_resize = resize > 0 and resize >= max(Decimal(1), o.remaining * pct)
+            if moved >= tick * max(1, self.tilt.hysteresis_ticks) or big_resize:
                 await self._amend(o, want)
 
     async def cancel_all(self, reason: str) -> int:
