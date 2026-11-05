@@ -19,7 +19,8 @@ from typing import Any
 
 from ..ledger import Ledger
 from ..markets import discover_series_markets
-from ..settings import AppConfig
+from ..settings import AppConfig, MarketBlendCfg
+from ..trading import blended_fair
 from .contracts import RulesError, WeatherContract, dst_reminder, parse_contract
 from .engine import FairValue, WeatherEngine
 from .model import ModelParams
@@ -161,11 +162,26 @@ async def log_rows(ledger: Ledger, rows: list[Row]) -> int:
     return n
 
 
-def format_table(rows: list[Row], min_conf: float) -> str:
+def quote_verdict(r: Row, min_conf: float, blend: MarketBlendCfg | None) -> str:
+    """What the trading loop would do with this row: the blended fair it would quote
+    around, or why it would not quote (same rules as trading.py)."""
+    if r.fair is None:
+        return r.error or "not priced"
+    if r.fair.confidence < min_conf:
+        return f"NO QUOTE: confidence {r.fair.confidence:.2f} < {min_conf}"
+    if blend is None:
+        return ""
+    f, how = blended_fair(r.fair.p, r.yes_bid, r.yes_ask, blend)
+    if f is None:
+        return f"NO QUOTE: {how}"
+    return f"quote around {f:.2f} ({how})"
+
+
+def format_table(rows: list[Row], min_conf: float, blend: MarketBlendCfg | None = None) -> str:
     out: list[str] = []
     hdr = (
         f"{'market':<26} {'bracket':>8} {'fair':>6} {'conf':>5} {'bid':>6} {'ask':>6} "
-        f"{'demo b/a':>11}  note (vs prod)"
+        f"{'demo b/a':>11}  note (vs prod) | would the bot quote?"
     )
     cur_event = None
     for r in rows:
@@ -184,11 +200,10 @@ def format_table(rows: list[Row], min_conf: float) -> str:
         ask = "-" if r.yes_ask is None else f"{r.yes_ask:.2f}"
         demo = f"{_fmt(r.demo_bid)}/{_fmt(r.demo_ask)}"
         note = r.error or r.edge_note
-        if r.fair is not None and r.fair.confidence < min_conf:
-            note = (note + " | low confidence").strip(" |")
+        verdict = quote_verdict(r, min_conf, blend)
         out.append(
             f"{r.contract.ticker:<26} {r.contract.label:>8} {fair:>6} {conf:>5} "
-            f"{bid:>6} {ask:>6} {demo:>11}  {note}"
+            f"{bid:>6} {ask:>6} {demo:>11}  {note} | {verdict}"
         )
     return "\n".join(out)
 

@@ -26,6 +26,7 @@ CFG = CFG.model_copy(
     update={
         "blend": CFG.blend.model_copy(update={"model_only_ok": True}),
         "symmetric": CFG.symmetric.model_copy(update={"enabled": False}),  # tilt-only tests
+        "trading": CFG.trading.model_copy(update={"tilt_enabled": True}),
     }
 )
 L = CFG.risk

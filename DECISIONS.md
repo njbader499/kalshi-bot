@@ -610,6 +610,38 @@ south-eastern stations. `sigma_f` floors were hit everywhere (residual sd ≈ 1.
 after bias), so the ensemble's own spread plus a small sigma is about right; the floor is
 now 0.7 with the ensemble's own sd taken as 1.0.
 
+### Third pass (same day): what the recalibration actually said, and the posture
+
+The laptop's second run (gfs_global + ecmwf_ifs025, 365 d and 90 d) found: NYC −0.2 /
+GFS −0.9 / ECMWF +0.2; MIA +1.0 / −1.3 / +2.4 (90 d); CHI +0.5 / −0.3 / +0.9; LAX −3.2 /
++2.2 / −6.5 (90 d, clipped to −6.0); ATL +1.6 / +0.5 / +2.3; BOS +0.9 / +1.8 / +0.4; DFW
++1.4 / 0.0 / +2.3; DEN +0.4 / +0.7 / +0.2. Two conclusions:
+
+1. **The deterministic GFS archive is not a usable proxy for the GEFS members.** Its sign
+   flipped against the first run (HRRR-blended) at most stations and against the live
+   ensemble (cold by 2-3 °F on Nov 4, warm by 1.3 °F at Miami in the archive). The
+   calibrator now writes `bias_gfs_f: 0.0` unless `--gfs-bias fit`; the ECMWF proxy
+   (same model and grid as the ENS members) is kept. The real fix is the **live-ensemble
+   bias** from the bot's own shadow log (raw member p50 at the last day-ahead snapshot vs
+   the settled value), which the calibrator now computes and uses once a station has 14
+   settled days. Fitted values are clipped to the ±6 config bound.
+2. **The step-5 table was taken mid-ramp (12:47 EST), so it compared a same-day nowcast
+   against a market that was watching live observations.** In that window the confidence
+   gate (0.5 < 0.6) blocks every quote anyway, whatever the disagreement guard says; the
+   `fair` command now prints the bot's actual verdict per bracket (confidence gate, then
+   blend/guard) so this is visible. The day-ahead comparison has to be made on tomorrow's
+   markets after 16:00 local (`fair --days 1`).
+
+Posture until the shadow-log calibration says otherwise: the bot is a **spread-capturing
+maker around the market's own mid**. `blend.weight` 0.8, `max_disagreement` 0.20, and the
+blended fair is clamped inside [best bid, best ask], so the model only chooses where inside
+the spread the pair sits and can veto a market. `symmetric.half_spread` 0.01 (improve a wide
+book by a tick, join a 3-tick one; never join a 2-tick one), `max_inventory` 20.
+`tilt_enabled: false`: a directional bet is a claim the model beats the market, and the
+evidence so far says the market is sharper on the leader. The expected economics are a few
+cents per filled contract less adverse selection, i.e. small, but it is the one edge the
+research supports and it does not require out-forecasting the NWS.
+
 ### Still open
 
 - **Better "so far" data.** The market knows the official running high within minutes

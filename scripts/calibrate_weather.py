@@ -41,14 +41,17 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kalshi_maker.weather.fit import (
+    MIN_DAYS_LIVE_BIAS,
+    LiveBias,
     StationFit,
     calibration_yaml,
     fit_station,
+    live_bias,
     model_key,
     offset_table,
 )
 from kalshi_maker.weather.model import DEFAULT_OBS_OFFSETS
-from kalshi_maker.weather.stations import STATIONS
+from kalshi_maker.weather.stations import SERIES_STATION, STATIONS
 
 UA = "kalshi-maker/0.1 calibration (personal research; contact via repo owner)"
 OPEN_METEO = "https://historical-forecast-api.open-meteo.com/v1/forecast"
@@ -124,6 +127,37 @@ def fetch_actuals(
     return {str(x["DATE"]): float(x[dt]) for x in rows if x.get(dt) not in (None, "")}, name
 
 
+def live_bias_from_ledger(path: Path) -> dict[str, list[tuple[float, float]]]:
+    """Per station: (raw ensemble p50 at the last snapshot before the climate day started,
+    settled value) pairs from the shadow log. Only model-v2 rows carry `remaining_hours`."""
+    out: dict[str, list[tuple[float, float]]] = {}
+    if not path.exists():
+        return out
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    rows = db.execute(
+        "SELECT ticker, taken_at, detail FROM fair_value_snapshots WHERE detail IS NOT NULL "
+        "ORDER BY taken_at"
+    ).fetchall()
+    finals: dict[str, int] = {}
+    day_ahead: dict[str, float] = {}  # event -> raw p50 at the last pre-day snapshot
+    for ticker, _taken_at, detail in rows:
+        ev = ticker.rsplit("-", 1)[0]
+        try:
+            d = json.loads(detail)
+        except json.JSONDecodeError:
+            continue
+        if d.get("cli_final") is not None:
+            finals[ev] = int(d["cli_final"])
+        elif d.get("remaining_hours") == 24 and d.get("ens_p10_p50_p90"):
+            day_ahead[ev] = float(d["ens_p10_p50_p90"][1])  # later snapshots overwrite
+    for ev, final in finals.items():
+        if ev in day_ahead:
+            code = SERIES_STATION.get(ev.split("-", 1)[0])
+            if code:
+                out.setdefault(code, []).append((day_ahead[ev], float(final)))
+    return out
+
+
 def offsets_from_ledger(path: Path) -> list[tuple[int, int]]:
     """(hourly obs extreme, official final) pairs from the shadow log."""
     if not path.exists():
@@ -165,6 +199,11 @@ def main() -> int:
     ap.add_argument("--stations", default=",".join(GHCN_IDS))
     ap.add_argument("--kind", choices=["max", "min"], default="max")
     ap.add_argument("--ledger", default="data/ledger.db")
+    ap.add_argument(
+        "--gfs-bias", choices=["zero", "fit"], default="zero",
+        help="write the fitted GFS member bias ('fit') or leave GFS members uncorrected "
+        "('zero', default: the deterministic gfs_global archive is a weak proxy for GEFS)",
+    )  # fmt: skip
     ap.add_argument("--out", default=None, help="write a weather: YAML fragment here")
     args = ap.parse_args()
 
@@ -212,7 +251,18 @@ def main() -> int:
     else:
         print("   none yet (needs days with a final CLI in the shadow log); prior kept")
 
-    text = calibration_yaml(fits, offsets)
+    live: dict[str, LiveBias] = {
+        code: live_bias(code, prs) for code, prs in live_bias_from_ledger(Path(args.ledger)).items()
+    }
+    print("\n== LIVE ensemble bias from the shadow log (raw member p50 day-ahead vs settled)")
+    if live:
+        for code, lb in sorted(live.items()):
+            flag = "" if lb.usable else f"  (needs {MIN_DAYS_LIVE_BIAS} days; not used yet)"
+            print(f"   {code}: n={lb.n} bias={lb.bias_f:+.1f}F mae={lb.mae}{flag}")
+    else:
+        print("   none yet (needs settled days with a day-ahead v2 snapshot)")
+
+    text = calibration_yaml(fits, offsets, live, gfs_bias=args.gfs_bias)
     print("\n" + text)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")

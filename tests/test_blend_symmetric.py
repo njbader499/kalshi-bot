@@ -49,9 +49,13 @@ def with_(cfg: AppConfig, **sections: object) -> AppConfig:
 # ---------- blended fair ----------
 
 
-def test_blend_weights_toward_the_market() -> None:
-    f, how = blended_fair(D("0.60"), D("0.70"), D("0.72"), MarketBlendCfg())
-    assert how == "blend" and f == D("0.6660")  # 0.6 * 0.71 + 0.4 * 0.60
+def test_blend_weights_toward_the_market_and_stays_inside_the_spread() -> None:
+    f, how = blended_fair(D("0.60"), D("0.70"), D("0.72"), MarketBlendCfg(weight=D("0.6")))
+    assert how == "blend" and f == D("0.70")  # 0.6*0.71 + 0.4*0.60 = 0.666 -> clamped to bid
+    f2, _ = blended_fair(D("0.71"), D("0.70"), D("0.72"), MarketBlendCfg(weight=D("0.6")))
+    assert f2 == D("0.71")  # inside the spread: unchanged
+    f3, _ = blended_fair(D("0.80"), D("0.70"), D("0.72"), MarketBlendCfg(weight=D("0.6")))
+    assert f3 == D("0.72")  # leaning above the market is clamped to the ask
 
 
 def test_disagreement_blocks_the_quote() -> None:
@@ -207,9 +211,11 @@ async def test_loop_blocks_quotes_when_model_fades_the_market() -> None:
 
 
 async def test_loop_quotes_on_the_blended_fair_with_tilt() -> None:
-    tl = loop(with_(CFG, symmetric=SymmetricCfg(enabled=False)))
+    tilt_on = CFG.trading.model_copy(update={"tilt_enabled": True})
+    tl = loop(with_(CFG, symmetric=SymmetricCfg(enabled=False), trading=tilt_on))
     tl.update_fair("E0-M0", D("0.90"), 1.0, ref_bid=D("0.80"), ref_ask=D("0.82"))
-    # blend = 0.6*0.81 + 0.4*0.90 = 0.846 -> YES bid at min(0.846-0.02, best bid 0.70 + tick)
+    # blend = 0.8*0.81 + 0.2*0.90 = 0.828 -> inside the spread -> YES bid at
+    # min(0.828 - 0.02, best demo bid 0.70 + tick) = 0.71
     await tl.step({"E0-M0": book("E0-M0", "0.70", "0.80")}, gate_open=True)
     (o,) = tl.pf.resting.values()
     assert o.side == "bid" and o.price == D("0.71")
@@ -222,7 +228,7 @@ async def test_loop_symmetric_pair_on_demo_uses_prod_reference() -> None:
     tl.update_fair("E0-M0", D("0.52"), 1.0, ref_bid=D("0.49"), ref_ask=D("0.51"))
     await tl.step({"E0-M0": book("E0-M0", "0.40", "0.60")}, gate_open=True)  # wide demo book
     got = sorted((o.side, o.price) for o in tl.pf.resting.values())
-    # blended fair 0.6*0.50 + 0.4*0.52 = 0.508 -> bid 0.48, ask 0.53 (rounded away from fair)
+    # blended fair 0.8*0.50 + 0.2*0.52 = 0.504 -> bid 0.48, ask 0.53 (rounded away from fair)
     assert got == [("ask", D("0.53")), ("bid", D("0.48"))]
 
 

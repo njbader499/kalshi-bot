@@ -127,10 +127,12 @@ weather:
 # max_disagreement is NOT quoted (and listed under "not quoted" in /status): on 2026-11-04 an
 # untuned model priced the favourite brackets at 0.11-0.22 against a market at 0.5-0.76 and
 # the bot went short every one of them.
+# The quoted fair is also clamped inside [best bid, best ask]: the model chooses where
+# INSIDE the spread the quotes centre; it can never push them past the market's own range.
 blend:
-  weight: "0.6"                # share of the market mid in the quoted fair
+  weight: "0.8"                # share of the market mid in the quoted fair
   max_spread: "0.10"           # prod book wider than this is not a usable reference
-  max_disagreement: "0.15"
+  max_disagreement: "0.20"     # model further than this from the mid -> no quote
   model_only_ok: false         # never quote on the model alone without a usable reference
   max_ref_age_seconds: 1500
 
@@ -139,7 +141,8 @@ blend:
 # do in the ledger (shadow_orders) and never sends anything to Kalshi.
 trading:
   trading_enabled: false
-  tilt_enabled: true
+  tilt_enabled: false          # directional bets stay OFF until `calibrate` shows the model
+                               # beats the market (Brier) on some horizon; symmetric only
   order_count: "1"               # contracts per quote (tiny while on demo)
   edge_full_size: "0.12"        # size scales with edge: 1 contract at the 2c buffer, up to max_order_cost at 12c edge
   count_hysteresis_pct: 25       # only resize a resting quote on a >= 25% change
@@ -153,15 +156,16 @@ trading:
 # (resting orders earn the spread and fade takers); it does not bet against the market.
 symmetric:
   enabled: true
-  half_spread: "0.02"          # each quote sits this far from fair (min; widened by the book)
+  half_spread: "0.01"          # one tick from fair: improves a wide book, joins a 3c one
   min_market_spread_ticks: 3   # only quote when the book's own spread leaves room
-  max_inventory: "30"          # contracts; past this only the reducing side is quoted
+  max_inventory: "20"          # contracts; past this only the reducing side is quoted
   skew_per_contract: "0.001"   # shift both quotes away from the held side, per contract
   min_price: "0.05"            # no quotes below 5c or above 95c
   count: "1"                   # contracts per quote (edge-scaled up to risk.max_order_cost)
 
 # Mode A, `tilt`: one-sided bids where the blended fair is extreme (favourite YES / longshot
-# NO). Used in markets where symmetric has no room. Switch with trading.tilt_enabled.
+# NO). Off by default (trading.tilt_enabled): it is a bet on the model being better than
+# the market, which the shadow-log calibration has not shown.
 tilt:
   edge_buffer: "0.02"
   favorite_threshold: "0.70"     # bid YES when fair >= 0.70

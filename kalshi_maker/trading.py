@@ -71,6 +71,9 @@ def blended_fair(
     if abs(model - mid) > cfg.max_disagreement:
         return None, f"disagree model={model} mid={mid}"
     f = (cfg.weight * mid + (1 - cfg.weight) * model).quantize(P4, ROUND_HALF_EVEN)
+    # Never lean outside the market's own range: the model picks where INSIDE the spread
+    # the quotes centre, it cannot push them past the best bid or ask.
+    f = min(ref_ask, max(ref_bid, f))
     return f, "blend"
 
 

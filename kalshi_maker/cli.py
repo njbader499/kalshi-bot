@@ -192,9 +192,14 @@ async def _fair(settings: Settings, args: argparse.Namespace) -> int:
                 return book
 
             rows = await shadow_rows(
-                cfg, prod, engine, booker(prod), demo_book_for=booker(demo_api)
-            )
-            print(format_table(rows, cfg.weather.min_confidence))
+                cfg, prod, engine, booker(prod), demo_book_for=booker(demo_api),
+                days=tuple(args.days),
+            )  # fmt: skip
+            print(format_table(rows, cfg.weather.min_confidence, cfg.blend))
+            print()
+            print("'would the bot quote?' applies the confidence gate and the market blend / "
+                  "disagreement guard from trading.py; the symmetric/tilt rules then decide "
+                  "the exact prices from the live book.")  # fmt: skip
             n = await log_rows(ledger, rows)
             print()
             print(f"logged {n} fair-value snapshot(s) to {cfg.paths.data_dir / 'ledger.db'}")
@@ -299,6 +304,10 @@ def build_parser() -> argparse.ArgumentParser:
     cal.add_argument("--min-days", type=int, default=3)
     cal.add_argument("--csv", type=Path, default=None, help="also write the joined rows")
     fv = sub.add_parser("fair", help="Phase 3 shadow: weather fair value vs Kalshi (no orders)")
+    fv.add_argument(
+        "--days", type=int, nargs="+", default=[0, 1],
+        help="climate days to price, relative to the station's today (0=today, 1=tomorrow)",
+    )  # fmt: skip
     fv.add_argument("--no-settlement-check", action="store_true")
     sub.add_parser("clock")
     sub.add_parser("cancel-bot-orders")

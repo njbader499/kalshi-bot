@@ -30,19 +30,28 @@ funded with $500. API tier Basic.
    `git merge origin/cloud/weather-model-fixes` (docs may conflict on line endings only).
 2. `powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1` — 362 tests, ruff, mypy.
 3. Update the LOCAL `config/config.yaml` from `config/config.example.yaml`: new `weather`
-   keys (`obs_offset_probs`, `ramp_*`, `stations`, and the new prior values sigma 1.5 /
-   nws_weight 0.5 / bias_f 1.0), new `blend:` and `symmetric:` sections,
-   `trading.tilt_enabled`. All new keys have defaults, so the old file still loads, but the
-   old sigma/weight/bias values would keep the old behaviour.
+   keys (`obs_offset_probs`, `ramp_*`, `stations`, `nws_bias_f: 0.0`, and the new prior
+   values sigma 1.5 / nws_weight 0.5 / bias_f 1.0), the `blend:` section (weight 0.8,
+   max_disagreement 0.20), the `symmetric:` section (half_spread 0.01, max_inventory 20),
+   and `trading.tilt_enabled: false`. All new keys have defaults, so the old file still
+   loads, but the old values would keep the old behaviour.
 4. `.\.venv\Scripts\python.exe scripts\calibrate_weather.py --days 365 --out config\weather_calibration.yaml`
    and paste its `stations:` block (and `obs_offset_probs` once it has data) under
    `weather:` in config.yaml. Check the NCEI station names it prints. The block carries
    `bias_gfs_f` / `bias_ecmwf_f` per station (applied to that model's members) plus the
    member-weighted `bias_f` fallback and `sigma_f`; the script prints the full-window and
-   last-90-day fits and uses the recent one when it has ≥ 60 days. The NWS component is
-   never biased by this fit (`weather.nws_bias_f` stays 0).
-5. `python -m kalshi_maker fair` and compare the fair values with the prod bid/ask: the
-   leading bracket should now be near the market, and "not quoted" reasons should be rare.
+   last-90-day fits and uses the recent one when it has ≥ 60 days. By default the GFS
+   members are left uncorrected (`bias_gfs_f: 0.0`; the deterministic archive proved a
+   poor proxy for GEFS) and only the ECMWF bias is written; `--gfs-bias fit` overrides.
+   Once a station has 14 settled days in the shadow log, the script switches that station
+   to the measured LIVE-ensemble bias. The NWS component is never biased by this fit
+   (`weather.nws_bias_f` stays 0). Values are clipped to the ±6 config bound.
+5. `python -m kalshi_maker fair --days 1` (tomorrow's markets; today's are a same-day
+   nowcast the market will always win while the sun is up). The table's last column is
+   the bot's verdict per bracket: the confidence gate first, then the market blend and
+   disagreement guard. Expect: leaders "quote around" a number inside the prod spread;
+   "disagree" on a few brackets is normal; "confidence" rejections on today's markets
+   between 10:00 and 16:00 station time are by design.
 6. `python -m kalshi_maker risk-reset --confirm`, delete `KILL` if present, restart the
    collector (`scripts\start-collector.ps1`), confirm the Telegram "bot started" alert and
    that /status shows realized/unrealized separately and a "not quoted:" line.
