@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -71,6 +72,7 @@ def build_text(
     deployed_cap: Decimal,
     risk_status: str,
     settlement_check: str,
+    extra_lines: list[str] | None = None,
 ) -> str:
     change = "n/a (first summary)" if prev_equity is None else fmt_money(equity - prev_equity)
     return "\n".join(
@@ -86,8 +88,25 @@ def build_text(
             f"{fmt_money(worst_case_exposure)} of {fmt_money(deployed_cap)} cap",
             f"Risk: {risk_status}",
             f"Settlements vs NWS CLI: {settlement_check}",
+            *(extra_lines or []),
         ]
     )
+
+
+def adverse_lines(
+    real: Mapping[str, tuple[int, str]], paper: Mapping[str, tuple[int, str]]
+) -> list[str]:
+    """Mean move of the real-market mid AGAINST each fill after 5/30/60 minutes
+    (+ = the market ran away from us right after filling: adverse selection)."""
+
+    def fmt(d: Mapping[str, tuple[int, str]]) -> str:
+        parts = [f"{col.removeprefix('mid_')} {mean} (n={n})" for col, (n, mean) in d.items()]
+        return ", ".join(parts) if parts else "-"
+
+    return [
+        "Adverse selection 7d (mid move against fill, + is bad): "
+        f"real {fmt(real)} | paper {fmt(paper)}"
+    ]
 
 
 async def ledger_counts(ledger: Ledger, since: float) -> dict[str, Any]:

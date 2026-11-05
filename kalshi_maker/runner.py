@@ -34,20 +34,23 @@ from .continuity import (
     SafetyGate,
     describe_clock_offset,
 )
-from .daily import build_text, due, ledger_counts, load_state, save_state
+from .daily import adverse_lines, build_text, due, ledger_counts, load_state, save_state
 from .instance_lock import AlreadyRunning, InstanceLock
 from .killswitch import install_signal_kill, write_kill_file
 from .ledger import Ledger
 from .markets import discover_series_markets
+from .marks import MarkTracker
+from .orders import DryRunExecutor
+from .paper import PaperTrader, levels_to_book
 from .power import keep_awake
 from .reconcile import ReconcileReport, reconcile
 from .rest import KalshiREST
 from .settings import Settings
 from .telegram import CommandRouter, Notifier, TelegramClient, poll_commands
-from .trading import TradingLoop, describe_mode
+from .trading import MARK_HAIRCUT, TradingLoop, describe_mode, in_pull_window
 from .watchdog import Watchdog, sync_cancel_bot_orders
 from .weather.settlement import check_settlements
-from .weather.shadow import log_rows, make_engine, shadow_rows
+from .weather.shadow import local_std_today, log_rows, make_engine, shadow_rows
 from .weather.sources import WeatherSources
 from .ws import KalshiWS, WSCallbacks
 
@@ -101,6 +104,28 @@ class Runner:
         self.trading = TradingLoop(self.settings.config, self.ledger, api=self.api)
         # On prod the live book is the real market; on demo the prod public snapshot is.
         self.trading.live_book_is_real = self.settings.env.value == "prod"
+        # Prod-paper: the same strategy evaluated on the PROD book, filled from the prod
+        # trade tape, never sent. Its pessimistic portfolio is the paper loop's position
+        # state (inventory skew and caps apply as they would live).
+        self.paper: PaperTrader | None = None
+        self.paper_loop: TradingLoop | None = None
+        self.marks: MarkTracker | None = None
+        cfg = self.settings.config
+        if self.prod_public is not None and cfg.trading.paper_enabled:
+            self.paper = PaperTrader(
+                self.prod_public, self.ledger, cfg.paths.data_dir / "paper_state.json"
+            )
+            dry = cfg.trading.model_copy(update={"trading_enabled": False})
+            self.paper_loop = TradingLoop(
+                cfg.model_copy(update={"trading": dry}), None, executor=DryRunExecutor()
+            )
+            self.paper_loop.live_book_is_real = True
+            self.paper_loop.pf = self.paper.pess
+            self.marks = MarkTracker(self.prod_public, self.ledger)
+        self.prod_levels: dict[str, Any] = {}
+        self._marks_task: asyncio.Task[None] | None = None
+        self._last_step_mono = 0.0
+        self._last_step_book_mono = 0.0
         safety = self.settings.config.safety
         self.monitor = ContinuityMonitor(safety.clock_jump_seconds, safety.loop_stall_seconds)
         self.gate = SafetyGate(
@@ -139,6 +164,8 @@ class Runner:
             )[:300] or "none"),
             self._status_line() if self.ws else "websocket not started",
         ]
+        if self.paper is not None:
+            lines.append(self.paper.summary(self._prod_mids(), MARK_HAIRCUT))
         return "\n".join(lines)
 
     def positions_text(self) -> str:
@@ -274,6 +301,7 @@ class Runner:
                     if await self.ledger.record_fill(m, source="ws"):
                         self.alert("fill", f"{m.get('market_ticker')} {m.get('book_side')} "
                             f"{m.get('count_fp')} @ {m.get('yes_price_dollars')}")  # fmt: skip
+                        await self._register_real_fill_mark(m)
                 else:
                     await self.ledger.record_order_event(m)
                     if self.trading.live:
@@ -292,6 +320,8 @@ class Runner:
         )
         for mk in markets:  # each market carries its series' category (risk bucket)
             self.trading.update_markets([mk], str(mk.get("_category") or "unknown"))
+            if self.paper_loop is not None:
+                self.paper_loop.update_markets([mk], str(mk.get("_category") or "unknown"))
         tickers = sorted(m["ticker"] for m in markets)
         say(
             f"watching {len(tickers)} market(s) in {', '.join(cfg.markets.weather_series)}"
@@ -307,8 +337,11 @@ class Runner:
         if prod is None:
             return
 
+        levels: dict[str, Any] = {}
+
         async def book(t: str) -> tuple[Any, Any]:
             ob = await prod.get_orderbook(t)
+            levels[t] = ob
             return ob.best_yes_bid, (None if ob.best_no_bid is None else 1 - ob.best_no_bid)
 
         def demo_book(t: str) -> tuple[Any, Any]:
@@ -323,16 +356,98 @@ class Runner:
             )
             n = await log_rows(self.ledger, rows)
             priced = [r for r in rows if r.fair is not None]
+            now_dt = datetime.now(UTC)
+            same_day = {
+                r.contract.ticker for r in rows
+                if (r.contract.day - local_std_today(r.contract, now_dt)).days == 0
+            }  # fmt: skip
+            self.trading.same_day_tickers = same_day
             for row in priced:
                 assert row.fair is not None
-                self.trading.update_fair(
-                    row.contract.ticker, row.fair.p, row.fair.confidence,
-                    row.fair.as_of.timestamp(), ref_bid=row.yes_bid, ref_ask=row.yes_ask,
-                )  # fmt: skip
+                for loop in (self.trading, self.paper_loop):
+                    if loop is None:
+                        continue
+                    loop.update_fair(
+                        row.contract.ticker, row.fair.p, row.fair.confidence,
+                        row.fair.as_of.timestamp(), ref_bid=row.yes_bid, ref_ask=row.yes_ask,
+                    )  # fmt: skip
+            self.prod_levels = levels
             say(f"shadow: logged {n} fair values ({len(rows) - len(priced)} not priced)")
         except Exception as e:
             log.exception("shadow pricing failed")
             await self.ledger.record_error("shadow_pricing", repr(e))
+            return
+        if self.paper is not None:
+            await self._paper_cycle(same_day)
+
+    # ---- prod-paper (never sends an order) ----
+    def _prod_mids(self) -> dict[str, Decimal | None]:
+        out: dict[str, Decimal | None] = {}
+        for t, ob in self.prod_levels.items():
+            b, nb = ob.best_yes_bid, ob.best_no_bid
+            if b is not None and nb is not None and (1 - nb) > b:
+                out[t] = (b + (1 - nb)) / 2
+            else:
+                out[t] = None
+        return out
+
+    async def _paper_cycle(self, same_day: set[str]) -> None:
+        assert self.paper is not None and self.paper_loop is not None
+        try:
+            mids = self._prod_mids()
+            fills = await self.paper.process_trades()
+            if self.marks is not None:
+                for f in fills:
+                    if f.mode != "pess":
+                        continue
+                    await self.marks.register(
+                        f"paper:pess:{f.trade_id}:{f.side}", "paper_pess", f.ticker, f.side,
+                        f.price, f.trade_ts, mids.get(f.ticker),
+                    )  # fmt: skip
+            open_tickers = set(self.prod_levels)
+            for t, result, p1, p2 in await self.paper.settle(open_tickers):
+                self.alert("info", f"paper settled {t} {result}: pess {p1:+.2f} opt {p2:+.2f}")
+            self.paper_loop.same_day_tickers = same_day
+            self.paper_loop.pull_active = self.trading.pull_active
+            mono = time.monotonic()
+            books = {t: levels_to_book(t, ob, mono) for t, ob in self.prod_levels.items()}
+            desired = self.paper_loop.desired(books)
+            nq = self.paper.requote(desired, self.prod_levels)
+            self.paper.persist()
+            pess_f = sum(1 for f in fills if f.mode == "pess")
+            say(f"paper: {pess_f} fill(s) this cycle; {nq} quotes resting on prod; "
+                f"not quoted: {len(self.paper_loop.skipped)}")  # fmt: skip
+            for f in fills:
+                if f.mode == "pess":
+                    self.alert("fill", f"PAPER {f.ticker} {f.side} {f.count} @ {f.price}")
+        except Exception as e:
+            log.exception("paper cycle failed")
+            await self.ledger.record_error("paper", repr(e))
+
+    async def _register_real_fill_mark(self, m: Mapping[str, Any]) -> None:
+        if self.marks is None:
+            return
+        t = str(m.get("market_ticker") or "")
+        f = self.trading.fairs.get(t)
+        mid = None
+        if f is not None and f.ref_bid is not None and f.ref_ask is not None:
+            mid = (f.ref_bid + f.ref_ask) / 2
+        try:
+            ts = float(m.get("ts_ms") or 0) / 1000 or time.time()
+            await self.marks.register(
+                f"real:{m.get('trade_id')}", "real", t, str(m.get("book_side") or ""),
+                Decimal(str(m.get("yes_price_dollars") or "0")), ts, mid,
+            )  # fmt: skip
+        except Exception as e:
+            log.warning("fill mark register failed", extra={"err": repr(e)})
+
+    async def _marks_once(self) -> None:
+        if self.marks is None:
+            return
+        try:
+            await self.marks.tick()
+        except Exception as e:
+            log.warning("marks tick failed", extra={"err": repr(e)})
 
     async def _settlement_once(self) -> None:
         prod = self.prod_public
@@ -412,13 +527,21 @@ class Runner:
             equity = bal.balance + pv
             counts = await ledger_counts(self.ledger, time.time() - 86400)
             pf = self.trading.pf
+            extra: list[str] = []
+            if self.paper is not None:
+                extra.append(self.paper.summary(self._prod_mids(), MARK_HAIRCUT))
+            week = time.time() - 7 * 86400
+            extra += adverse_lines(
+                await self.ledger.adverse_selection("real", week),
+                await self.ledger.adverse_selection("paper_pess", week),
+            )
             text = build_text(
                 day, self.settings.env.value, equity, bal.balance, pv,
                 Decimal(st.last_equity) if st.last_equity else None, counts,
                 sum(1 for p in pf.positions.values() if p.qty != 0), pf.total_exposure(),
                 self.settings.config.risk.max_capital_deployed,
                 self.trading.risk.can_trade().reason or "ok (no halts)",
-                self.last_settle_text,
+                self.last_settle_text, extra,
             )  # fmt: skip
         except Exception as e:
             log.exception("daily summary failed")
@@ -448,6 +571,23 @@ class Runner:
         lead = self.ws.stats.clock_lead_lower_bound if self.ws else None
         if lead is not None and lead > thr:
             say(f"WARNING clock drift: exchange is at least {lead:.2f}s ahead (from WS).")
+
+    def _books_moved(self, now: float) -> bool:
+        """Re-quote early when a quoted market's book changed since the last step."""
+        cfg = self.settings.config.trading
+        if not cfg.requote_on_move or self.ws is None:
+            return False
+        if now - self._last_step_mono < cfg.min_requote_seconds:
+            return False
+        quoted = self.trading.pf.quoted_markets()
+        if not quoted:
+            return False
+        books = self.ws.books
+        latest = max((books[t].updated_mono for t in quoted if t in books), default=0.0)
+        if latest > self._last_step_book_mono:
+            self._last_step_book_mono = latest
+            return True
+        return False
 
     def _status_line(self) -> str:
         assert self.ws is not None
@@ -488,6 +628,7 @@ class Runner:
         next_shadow = t_start + 20
         next_settle = t_start + 30
         next_trade = t_start + 25
+        next_marks = t_start + 90
         tick_errors = 0
         self.alert("lifecycle", f"bot started ({describe_mode(cfg)})")
         if self.telegram is not None and self.notifier is not None:
@@ -533,9 +674,19 @@ class Runner:
                 if self.max_seconds is not None and now - t_start >= self.max_seconds:
                     say(f"--max-seconds {self.max_seconds:g} reached; stopping")
                     break
-                if now >= next_trade:
+                self.trading.pull_active = in_pull_window(
+                    datetime.now(UTC).minute, cfg.trading.pull_minutes
+                )
+                step_idle = self._trade_task is None or self._trade_task.done()
+                # Re-quote early when a quoted book moved, but only if the previous step
+                # has finished (otherwise the move would be consumed and never acted on).
+                if now >= next_trade or (step_idle and self._books_moved(now)):
                     next_trade = now + cfg.trading.loop_seconds
+                    self._last_step_mono = now
                     self._spawn("_trade_task", self._trade_once)
+                if now >= next_marks:
+                    next_marks = now + 60
+                    self._spawn("_marks_task", self._marks_once)
                 try:
                     (
                         next_status,
@@ -611,8 +762,7 @@ class Runner:
             self.watchdog.stop()
         for t in (
             self._shadow_task, self._settle_task, self._trade_task, self._poll_task,
-            self._summary_task,
-            self._notify_task,
+            self._summary_task, self._notify_task, self._marks_task,
         ):  # fmt: skip
             if t is not None and not t.done():
                 t.cancel()

@@ -3,8 +3,9 @@
 Current state of the Kalshi maker bot, for whoever picks this up next (human or Claude).
 Spec: `KALSHI_MAKER_BOT_PROMPT.md`. Every decision and doc conflict: `DECISIONS.md`.
 
-_Last updated: 2026-11-05 (cloud session): model v2, market blend, symmetric quoting on
-branch `cloud/weather-model-fixes` — see "Merging the model fixes" below. Trading on the
+_Last updated: 2026-11-05 (cloud session, fourth pass): prod-paper simulator,
+adverse-selection marks, re-quote on move, pull windows, category cap, FEATURE FREEZE — on
+branch `cloud/weather-model-fixes`; see "Merging the model fixes" below. Trading on the
 laptop was HALTED by the risk stops at 2026-11-05 06:01Z (phantom loss, see DECISIONS.md
 "Model v2") and the collector was stopped by Ctrl+C at 13:06Z._
 
@@ -28,13 +29,16 @@ funded with $500. API tier Basic.
 
 1. Commit or stash local edits, then `git fetch origin` and
    `git merge origin/cloud/weather-model-fixes` (docs may conflict on line endings only).
-2. `powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1` — 362 tests, ruff, mypy.
+2. `powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1` — 388 tests, ruff, mypy.
 3. Update the LOCAL `config/config.yaml` from `config/config.example.yaml`: new `weather`
    keys (`obs_offset_probs`, `ramp_*`, `stations`, `nws_bias_f: 0.0`, and the new prior
    values sigma 1.5 / nws_weight 0.5 / bias_f 1.0), the `blend:` section (weight 0.8,
    max_disagreement 0.20), the `symmetric:` section (half_spread 0.01, max_inventory 20),
-   and `trading.tilt_enabled: false`. All new keys have defaults, so the old file still
-   loads, but the old values would keep the old behaviour.
+   and `trading.tilt_enabled: false`. Fourth pass: `risk.max_cost_per_category: "300"`
+   (= the deployed cap; one category) and, optional since they default on,
+   `trading.requote_on_move: true`, `min_requote_seconds: 2`, `pull_minutes: [50, 6]`,
+   `paper_enabled: true`. All new keys have defaults, so the old file still loads, but the
+   old values would keep the old behaviour.
 4. `.\.venv\Scripts\python.exe scripts\calibrate_weather.py --days 365 --out config\weather_calibration.yaml`
    and paste its `stations:` block (and `obs_offset_probs` once it has data) under
    `weather:` in config.yaml. Check the NCEI station names it prints. The block carries
@@ -52,9 +56,16 @@ funded with $500. API tier Basic.
    disagreement guard. Expect: leaders "quote around" a number inside the prod spread;
    "disagree" on a few brackets is normal; "confidence" rejections on today's markets
    between 10:00 and 16:00 station time are by design.
-6. `python -m kalshi_maker risk-reset --confirm`, delete `KILL` if present, restart the
+6. `python -m kalshi_maker trades <an open KXHIGH ticker> --max 5` once: it prints the raw
+   field names of the prod trade tape. If any line says UNPARSEABLE, fix `parse_trade` in
+   `kalshi_maker/paper.py` before restarting (the simulator fills from this tape).
+7. `python -m kalshi_maker risk-reset --confirm`, delete `KILL` if present, restart the
    collector (`scripts\start-collector.ps1`), confirm the Telegram "bot started" alert and
-   that /status shows realized/unrealized separately and a "not quoted:" line.
+   that /status shows realized/unrealized separately, a "not quoted:" line and a
+   "PROD-PAPER" line. After the first shadow cycle `python -m kalshi_maker paper` works.
+8. Then **nothing changes for 6 weeks** (DECISIONS.md "Fourth pass": freeze, weekly check,
+   kill and go-live criteria). The weekly check is `python -m kalshi_maker paper --days 7`
+   plus the daily summaries; the pessimistic paper line is the only P&L that counts.
 
 ## How to run
 

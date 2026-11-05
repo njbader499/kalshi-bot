@@ -484,6 +484,19 @@ class KalshiREST:
         data = await self.request("GET", f"/markets/{ticker}/orderbook", params={"depth": depth})
         return OrderbookLevels.parse(data)
 
+    def iter_trades(
+        self, ticker: str, min_ts: int | None = None, max_ts: int | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Public trade tape for one market (GET /markets/trades; min_ts/max_ts are unix
+        seconds). Field names are parsed defensively by paper.parse_trade; see the
+        UNVERIFIED note there until a live call has confirmed them."""
+        params: dict[str, Any] = {"ticker": ticker, "limit": 1000}
+        if min_ts is not None:
+            params["min_ts"] = int(min_ts)
+        if max_ts is not None:
+            params["max_ts"] = int(max_ts)
+        return self.paginate("/markets/trades", "trades", params)
+
     # ---- authenticated, read-only ----
     async def get_balance(self) -> Balance:
         return Balance.parse(await self.request("GET", BALANCE_PATH, auth=True))

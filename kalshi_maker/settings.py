@@ -319,6 +319,24 @@ class TradingCfg(_Strict):
 
     trading_enabled: bool = False
     tilt_enabled: bool = True  # Mode A quotes (favourite / NO tilt); symmetric is separate
+    # Re-quote as soon as a quoted market's best bid/ask moves (the WS book is live), not
+    # only on the loop timer; never more often than min_requote_seconds.
+    requote_on_move: bool = True
+    min_requote_seconds: int = Field(default=2, ge=1, le=60)
+    # Minutes-past-the-hour window [start, end) (wrapping) in which SAME-DAY weather quotes
+    # are pulled: the hourly METAR lands at about :53 and the market reprices on it.
+    # [] disables.
+    pull_minutes: list[int] = Field(default_factory=lambda: [50, 6])
+    # Prod-paper: run the strategy against the real book and trade tape (no orders) and
+    # keep a simulated P&L. The evidence for going live.
+    paper_enabled: bool = True
+
+    @field_validator("pull_minutes")
+    @classmethod
+    def _pull(cls, v: list[int]) -> list[int]:
+        if v and (len(v) != 2 or not all(0 <= m <= 59 for m in v)):
+            raise ValueError("pull_minutes must be [] or [start_minute, end_minute] in 0..59")
+        return v
     order_count: Decimal = Field(gt=0, le=Decimal("100"))  # MINIMUM contracts per quote
     # Edge-scaled size: at edge == tilt.edge_buffer a quote is order_count contracts; it
     # grows linearly to risk.max_order_cost at edge >= edge_full_size, then is clipped to

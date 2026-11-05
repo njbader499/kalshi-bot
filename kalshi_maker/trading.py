@@ -161,6 +161,10 @@ class TradingLoop:
         # reference comes from the prod public snapshot stored with each fair value.
         self.live_book_is_real = False
         self.skipped: dict[str, str] = {}  # ticker -> why not quoted this step
+        # Same-day weather markets (set by the runner from the contracts) are pulled inside
+        # trading.pull_minutes, when the hourly observation lands.
+        self.same_day_tickers: set[str] = set()
+        self.pull_active = False
 
     # ---- inputs ----
     def update_markets(self, markets: Iterable[Mapping[str, Any]], category: str) -> None:
@@ -230,6 +234,9 @@ class TradingLoop:
                 continue
             if now - f.at > t_cfg.max_fair_age_seconds:
                 self.skipped[t] = "stale fair"
+                continue
+            if self.pull_active and t in self.same_day_tickers:
+                self.skipped[t] = "pull window (hourly obs due)"
                 continue
             if f.confidence < min_conf:
                 self.skipped[t] = f"low confidence {f.confidence}"
@@ -319,6 +326,14 @@ class TradingLoop:
 
     async def cancel_all(self, reason: str) -> int:
         return await self.om.cancel_all(reason)
+
+
+def in_pull_window(minute: int, window: list[int]) -> bool:
+    """minute-of-hour inside [start, end), wrapping past :59 (e.g. [50, 6])."""
+    if not window:
+        return False
+    a, b = window
+    return a <= minute < b if a <= b else (minute >= a or minute < b)
 
 
 def describe_mode(cfg: AppConfig) -> str:

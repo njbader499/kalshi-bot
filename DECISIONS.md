@@ -642,6 +642,58 @@ evidence so far says the market is sharper on the leader. The expected economics
 cents per filled contract less adverse selection, i.e. small, but it is the one edge the
 research supports and it does not require out-forecasting the NWS.
 
+### Fourth pass (same day): evidence before capital — prod-paper, adverse-selection marks, pulls
+
+Owner's framing: "pretend this is your money". The honest answer was that nothing on demo
+can tell us whether the maker edge is real, because demo fills happen against a thin, stale
+book. So the last build before a feature freeze adds the measurement, not more strategy:
+
+1. **Prod-paper simulator** (`kalshi_maker/paper.py`, runs inside the collector every
+   shadow cycle, never sends an order). The same `TradingLoop.desired()` is evaluated on the
+   PROD public book (`live_book_is_real=True`, positions = the simulator's own pessimistic
+   portfolio, so inventory skew and caps apply). Fills come from the PROD trade tape
+   (`GET /markets/trades`), walked in time order against the quotes that were resting:
+   *pessimistic* = a trade strictly through our price, or at-price volume beyond the size
+   that was ahead of us when we posted (price-time priority); *optimistic* = any trade at or
+   through our price. Positions settle on prod `result`. State: `data/paper_state.json`
+   (a filled quote must round-trip as filled: UNSET sentinel, not 0); fills: append-only
+   `paper_fills`. `python -m kalshi_maker paper` prints it; /status and the daily summary
+   carry a PROD-PAPER line. **The pessimistic book is the go-live evidence; demo P&L is
+   not.** UNVERIFIED until the laptop runs `python -m kalshi_maker trades <ticker>` once:
+   the trade field names (`yes_price_dollars`/`count_fp`, `taker_side`, `created_time`),
+   for which `parse_trade` carries a cents fallback.
+2. **Adverse-selection marks** (`kalshi_maker/marks.py`, tables `fill_marks`). Every real
+   fill and every pessimistic paper fill records the prod mid at the fill and 5/30/60 min
+   later; `Ledger.adverse_selection` reports the mean move against us per horizon, in the
+   daily summary and `paper --days N`. A maker whose spread capture is smaller than its
+   30-minute adverse move is losing money however many fills it has. Marks that cannot be
+   taken within 4 minutes of their due time (bot or API down) are stored as `na`, never
+   back-filled with a later price.
+3. **Re-quote on move** (`trading.requote_on_move`, default true; floor
+   `min_requote_seconds` 2). The WS book is live; waiting up to `loop_seconds` to move a
+   quote after the best bid/ask changed is how a maker gets picked off. The main loop now
+   runs a trade step as soon as a quoted market's book changed since the last step.
+4. **Pull windows** (`trading.pull_minutes`, default `[50, 6]`): SAME-DAY weather quotes are
+   pulled from :50 to :06 each hour, when the hourly METAR lands and the market reprices
+   on it before our model has seen it. Day-ahead markets are unaffected. `[]` disables.
+5. **Category cap = deployed cap** (`max_cost_per_category: "300"`). With one category
+   (weather) a $75 category cap would have silently kept most of the bankroll idle; the
+   event and market caps still bound each day's exposure.
+
+**Feature freeze (6 weeks from the restart).** No strategy or model change until the
+prod-paper ledger has ≥ 30 settled markets or 6 weeks, whichever is later. Weekly check,
+in order: (a) pessimistic paper realized + unrealized, (b) adverse selection at 30 min vs
+the average spread captured, (c) live-ensemble bias from the shadow log once a station has
+14 settled days, (d) demo risk events. Kill criteria for the idea: pessimistic paper P&L
+negative after 30 settled markets, or 30-minute adverse selection ≥ the half-spread.
+Go-live criteria: pessimistic paper positive over ≥ 30 settled markets AND physically in
+the US (or Kalshi's written OK) AND prod gate confirmed, at half the demo limits.
+
+Not done, deliberately: Kalshi's liquidity/maker rewards program (the owner checks the
+current rules and whether weather series qualify; a program payment would change the
+economics more than any model change), more series or cities (first measure one), and the
+sub-hourly observation feed (the biggest same-day edge, but it is a data-source project).
+
 ### Still open
 
 - **Better "so far" data.** The market knows the official running high within minutes
@@ -649,7 +701,8 @@ research supports and it does not require out-forecasting the NWS.
   Mesonet 1-minute ASOS feed (public, academic), or a legitimate TWC source. This is the
   single biggest remaining edge on same-day markets.
 - `bias_f: 1.0` is a one-day prior; replace it with the calibrator's per-station fit.
-- Demo fills are not evidence of edge (prod-realism report still to do).
+- Demo fills are not evidence of edge; the prod-paper simulator (fourth pass) is.
+- Verify the prod trade-tape field names with one `trades` call (UNVERIFIED).
 - NO-side settlement netting: a YES and a NO fill in the same market net on Kalshi;
   `apply_fill` realises the pair. Verify on demo with a symmetric fill pair.
 

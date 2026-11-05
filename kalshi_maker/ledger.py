@@ -20,6 +20,7 @@ import hashlib
 import json
 import time
 from collections.abc import Iterable, Mapping
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -140,6 +141,32 @@ CREATE TABLE IF NOT EXISTS config_versions (
     content         TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS paper_fills (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at     REAL NOT NULL,
+    mode            TEXT NOT NULL,      -- pess | opt
+    ticker          TEXT NOT NULL,
+    side            TEXT NOT NULL,      -- bid (buy YES) | ask (buy NO)
+    price           TEXT NOT NULL,      -- YES price
+    count           TEXT NOT NULL,
+    trade_id        TEXT NOT NULL,
+    trade_ts        REAL NOT NULL,
+    queue_ahead     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fill_marks (
+    fill_key        TEXT PRIMARY KEY,   -- real:<trade_id> | paper:<mode>:<trade_id>:<side>
+    kind            TEXT NOT NULL,      -- real | paper_pess | paper_opt
+    ticker          TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    price           TEXT NOT NULL,
+    filled_at       REAL NOT NULL,
+    mid_at_fill     TEXT,
+    mid_5m          TEXT,
+    mid_30m         TEXT,
+    mid_60m         TEXT
+);
+
 CREATE TABLE IF NOT EXISTS errors (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     recorded_at     REAL NOT NULL,
@@ -157,9 +184,21 @@ APPEND_ONLY = (
     "balance_snapshots",
     "fair_value_snapshots",
     "order_actions",
+    "paper_fills",
     "config_versions",
     "errors",
 )
+
+
+_MARK_COLS = ("mid_at_fill", "mid_5m", "mid_30m", "mid_60m")
+_MARK_UPDATES = {c: f"UPDATE fill_marks SET {c} = ? WHERE fill_key = ?" for c in _MARK_COLS}  # noqa: S608
+_MARK_SELECTS = {
+    c: (
+        f"SELECT side, mid_at_fill, {c} FROM fill_marks WHERE kind LIKE ? AND "  # noqa: S608
+        f"filled_at >= ? AND mid_at_fill IS NOT NULL AND {c} IS NOT NULL"
+    )
+    for c in ("mid_5m", "mid_30m", "mid_60m")
+}
 
 
 def _triggers() -> str:
@@ -444,6 +483,72 @@ class Ledger:
         )
         await self.db.commit()
         return h
+
+    async def record_paper_fill(self, f: Any, recorded_at: float) -> None:
+        await self.db.execute(
+            "INSERT INTO paper_fills (recorded_at, mode, ticker, side, price, count, trade_id, "
+            "trade_ts, queue_ahead) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                recorded_at, f.mode, f.ticker, f.side, str(f.price), str(f.count), f.trade_id,
+                float(f.trade_ts), str(f.queue_ahead),
+            ),
+        )  # fmt: skip
+        await self.db.commit()
+
+    async def upsert_fill_mark(
+        self, key: str, kind: str, ticker: str, side: str, price: str, filled_at: float,
+        **marks: str | None,
+    ) -> None:  # fmt: skip
+        """Create the row on the first call; later calls only fill in the given marks."""
+        await self.db.execute(
+            "INSERT OR IGNORE INTO fill_marks (fill_key, kind, ticker, side, price, filled_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (key, kind, ticker, side, price, filled_at),
+        )
+        for col, val in marks.items():
+            if col not in _MARK_COLS:
+                raise ValueError(f"unknown mark column {col}")
+            if val is not None:
+                stmt = _MARK_UPDATES[col]  # fixed statements: no user input in the SQL text
+                await self.db.execute(stmt, (val, key))
+        await self.db.commit()
+
+    async def pending_fill_marks(
+        self, before: float
+    ) -> list[tuple[str, str, str, float, dict[str, str | None]]]:
+        """Rows filled before `before` with a horizon mark missing:
+        (fill_key, ticker, side, filled_at, {mid_5m, mid_30m, mid_60m})."""
+        q = (
+            "SELECT fill_key, ticker, side, filled_at, mid_5m, mid_30m, mid_60m FROM fill_marks "
+            "WHERE filled_at <= ? AND (mid_5m IS NULL OR mid_30m IS NULL OR mid_60m IS NULL) "
+            "ORDER BY filled_at"
+        )
+        async with self.db.execute(q, (before,)) as cur:
+            return [
+                (
+                    str(r[0]), str(r[1]), str(r[2]), float(r[3]),
+                    {"mid_5m": r[4], "mid_30m": r[5], "mid_60m": r[6]},
+                )
+                async for r in cur
+            ]  # fmt: skip
+
+    async def adverse_selection(self, kind_prefix: str, since: float) -> dict[str, tuple[int, str]]:
+        """Mean move of the mid AGAINST us per horizon: for a YES buy (bid) that is
+        mid_at_fill - mid_h; for a NO buy (ask) it is mid_h - mid_at_fill. Positive = the
+        market moved against the fill. Returns {horizon: (n, mean)} as strings."""
+        out: dict[str, tuple[int, str]] = {}
+        for col, q in _MARK_SELECTS.items():
+            n = 0
+            tot = Decimal(0)
+            async with self.db.execute(q, (kind_prefix + "%", since)) as cur:
+                async for side, m0, mh in cur:
+                    if str(mh) == "na":
+                        continue
+                    move = Decimal(str(m0)) - Decimal(str(mh))
+                    tot += move if side == "bid" else -move
+                    n += 1
+            out[col] = (n, str((tot / n).quantize(Decimal("0.0001"))) if n else "-")
+        return out
 
     async def _error_nocommit(self, kind: str, detail: str, raw: Any = None) -> None:
         await self.db.execute(

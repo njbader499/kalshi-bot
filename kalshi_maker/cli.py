@@ -9,6 +9,8 @@ python -m kalshi_maker orderbook TICKER [--depth 10]
 python -m kalshi_maker run [--max-seconds N]   # Phase 2: books + ledger, NO orders
 python -m kalshi_maker calibrate   # Phase 3: Brier / reliability / bias (after 3+ days)
 python -m kalshi_maker fair        # Phase 3: weather fair value vs bid/ask, NO orders
+python -m kalshi_maker paper       # prod-paper simulator: P&L, open positions, adverse selection
+python -m kalshi_maker trades TICKER [--max 20]   # PROD public trade tape (what paper fills from)
 python -m kalshi_maker clock          # local clock vs exchange (warns if drift > 1 s)
 python -m kalshi_maker smoke          # all of the above in one go, for Phase 1 sign-off
 python -m kalshi_maker cancel-bot-orders   # cancel resting orders with the bot prefix only
@@ -21,6 +23,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -92,6 +95,10 @@ async def _run(args: argparse.Namespace, settings: Settings) -> int:
         return await _calibrate(settings, args)
     if cmd == "fair":
         return await _fair(settings, args)
+    if cmd == "paper":
+        return await _paper(settings, args)
+    if cmd == "trades":
+        return await _trades(settings, args)
     if cmd == "check-config":
         print("config OK")
         print(_dump(settings.config.risk.model_dump()))
@@ -224,6 +231,97 @@ async def _fair(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+async def _paper(settings: Settings, args: argparse.Namespace) -> int:
+    """Prod-paper report: the strategy run against PROD books, filled from the PROD trade
+    tape, never sent. Pessimistic = only trades that went THROUGH our price, or at-price
+    volume beyond the queue ahead of us. Optimistic = any trade at or through our price."""
+    from .daily import adverse_lines
+    from .ledger import Ledger
+    from .paper import load_state
+    from .trading import MARK_HAIRCUT
+
+    cfg = settings.config
+    path = cfg.paths.data_dir / "paper_state.json"
+    if not path.exists():
+        print(f"no paper state yet at {path} (written after the collector's first shadow cycle)")
+        return 0
+    st = load_state(path)
+    days = max(0.0, (time.time() - st.started_at) / 86400) if st.started_at else 0.0
+    print(f"PROD-PAPER state ({days:.1f} days), {len(st.quotes)} quotes resting on prod books")
+    print(
+        f"  pessimistic: realized {Decimal(st.realized_pess):+.2f}, {st.fills_pess} fills, "
+        f"{len(st.positions_pess)} open positions"
+    )
+    print(
+        f"  optimistic:  realized {Decimal(st.realized_opt):+.2f}, {st.fills_opt} fills, "
+        f"{len(st.positions_opt)} open positions"
+    )
+    print(f"  settled markets: {len(st.settled)}")
+    prod = KalshiREST(cfg.hosts.prod.rest, cfg.rate_limits)
+    try:
+        if st.positions_pess:
+            print("  open (pessimistic), marked at the prod mid less the haircut:")
+            total = Decimal(0)
+            for t, p in sorted(st.positions_pess.items()):
+                qty, cost = Decimal(p["qty"]), Decimal(p["cost"])
+                try:
+                    ob = await prod.get_orderbook(t)
+                    b, nb = ob.best_yes_bid, ob.best_no_bid
+                    mid = (b + 1 - nb) / 2 if b is not None and nb is not None else None
+                except Exception:
+                    mid = None
+                if mid is None:
+                    val = cost
+                    note = "no two-sided book: at cost"
+                else:
+                    m = max(Decimal(0), (mid if qty > 0 else 1 - mid) - MARK_HAIRCUT)
+                    val = m * abs(qty)
+                    note = f"mid {mid:.2f}"
+                total += val - cost
+                side = "YES" if qty > 0 else "NO"
+                print(f"    {t:34s} {side} x{abs(qty)} cost {cost:.2f} value {val:.2f} ({note})")
+            print(f"  unrealized (pessimistic): {total:+.2f}")
+    finally:
+        await prod.aclose()
+    ledger = await Ledger.open(cfg.paths.data_dir / "ledger.db")
+    try:
+        since = time.time() - args.days * 86400
+        for line in adverse_lines(
+            await ledger.adverse_selection("real", since),
+            await ledger.adverse_selection("paper_pess", since),
+        ):
+            print(line.replace("7d", f"{args.days}d"))
+    finally:
+        await ledger.close()
+    return 0
+
+
+async def _trades(settings: Settings, args: argparse.Namespace) -> int:
+    """Print the PROD public trade tape for one market: the paper simulator's fill source."""
+    from .paper import parse_trade
+
+    cfg = settings.config
+    prod = KalshiREST(cfg.hosts.prod.rest, cfg.rate_limits)
+    n = 0
+    try:
+        async for raw in prod.iter_trades(args.ticker):
+            if n == 0:
+                print("raw fields:", ", ".join(sorted(raw)))
+            try:
+                tr = parse_trade(raw)
+            except Exception as e:
+                print(f"  UNPARSEABLE: {e!r}: {_dump(raw)}")
+            else:
+                print(f"  {tr.ts:>12.0f}  yes {tr.yes_price}  x{tr.count}  taker={tr.taker_side}")
+            n += 1
+            if n >= args.max:
+                break
+    finally:
+        await prod.aclose()
+    print(f"{n} trade(s) shown for {args.ticker} (newest first)")
+    return 0
+
+
 async def _calibrate(settings: Settings, args: argparse.Namespace) -> int:
     """Brier / reliability / per-station bias from the shadow log vs PROD outcomes."""
     from .weather.calibration import (
@@ -309,6 +407,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="climate days to price, relative to the station's today (0=today, 1=tomorrow)",
     )  # fmt: skip
     fv.add_argument("--no-settlement-check", action="store_true")
+    pp = sub.add_parser("paper", help="prod-paper simulator report (never sends orders)")
+    pp.add_argument("--days", type=int, default=7, help="adverse-selection window")
+    tr = sub.add_parser("trades", help="PROD public trade tape for one market")
+    tr.add_argument("ticker")
+    tr.add_argument("--max", type=int, default=20)
     sub.add_parser("clock")
     sub.add_parser("cancel-bot-orders")
     sub.add_parser("upgrade-tier")

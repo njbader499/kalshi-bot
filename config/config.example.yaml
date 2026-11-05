@@ -19,7 +19,7 @@ risk:
   max_capital_deployed: "300"
   max_cost_per_market: "50"
   max_cost_per_event: "75"
-  max_cost_per_category: "150"
+  max_cost_per_category: "300"   # weather is ONE category: equal to max_capital_deployed
   max_order_cost: "15"
   max_resting_orders: 40
   max_markets_quoted: 3          # 3 while in demo; spec default for later is 10
@@ -149,6 +149,12 @@ trading:
   loop_seconds: 15
   max_fair_age_seconds: 1500     # don't quote on a fair value older than this
   min_seconds_between_amends: 20
+  requote_on_move: true          # run a trade step as soon as a quoted book moves (WS), not
+  min_requote_seconds: 2         # only on the timer; never more often than this
+  pull_minutes: [50, 6]          # pull SAME-DAY weather quotes from :50 to :06 (hourly METAR
+                                 # lands ~:53 and the market reprices before our model sees it)
+  paper_enabled: true            # prod-paper simulator: strategy on the PROD book, fills from
+                                 # the PROD trade tape, NO orders. The go-live evidence.
 
 # Mode A tilt (Section 3): rest bids only on the side the bias favors.
 # Mode S, `symmetric` (Section 3 / strategy/symmetric.py): a YES bid and a NO bid around the
