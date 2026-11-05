@@ -22,6 +22,12 @@ from kalshi_maker.weather.stations import SERIES_STATION, STATIONS
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
 CFG = load_config(EXAMPLE)
+CFG = CFG.model_copy(
+    update={
+        "blend": CFG.blend.model_copy(update={"model_only_ok": True}),
+        "symmetric": CFG.symmetric.model_copy(update={"enabled": False}),  # tilt-only tests
+    }
+)
 L = CFG.risk
 CENT = TickGrid([PriceRange(D(0), D(1), D("0.01"))])
 

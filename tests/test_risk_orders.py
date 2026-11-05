@@ -28,6 +28,15 @@ from kalshi_maker.trading import TradingLoop
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
 CFG: AppConfig = load_config(EXAMPLE)
+# These loop tests feed MODEL fair values with no real-market reference; they exercise
+# sizing/risk/diff logic, so let the loop quote on the model alone (blend tests are in
+# test_blend_symmetric.py).
+CFG = CFG.model_copy(
+    update={
+        "blend": CFG.blend.model_copy(update={"model_only_ok": True}),
+        "symmetric": CFG.symmetric.model_copy(update={"enabled": False}),  # tilt-only tests
+    }
+)
 L = CFG.risk  # $500 bankroll limits: order 15, market 50, event 75, category 150, capital 300
 CENT = TickGrid([PriceRange(D(0), D(1), D("0.01"))])
 

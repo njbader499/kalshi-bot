@@ -203,8 +203,18 @@ class MarketsCfg(_Strict):
         return v
 
 
+class StationModelCfg(_Strict):
+    """Per-station overrides of the model parameters (fit by scripts/calibrate_weather.py)."""
+
+    bias_f: float | None = Field(default=None, ge=-5, le=5)
+    sigma_f: float | None = Field(default=None, ge=0.3, le=10)
+    nws_weight: float | None = Field(default=None, ge=0, le=1)
+    nws_sigma_f: float | None = Field(default=None, ge=0.3, le=10)
+
+
 class WeatherCfg(_Strict):
-    """Phase 3 weather fair-value engine. Model params are untuned priors; see DECISIONS.md."""
+    """Weather fair-value engine (model v2, see weather/model.py). The global parameters are
+    priors; per-station values from the calibration script override them."""
 
     # Owner-approved climate-day rule (NWS LST day) must be re-verified before US DST
     # resumes 2027-03-14. Until this is set true, DST-season dates are refused.
@@ -216,6 +226,84 @@ class WeatherCfg(_Strict):
     min_confidence: float = Field(ge=0, le=1)
     fair_interval_minutes: int = Field(ge=1, le=240)
     settlement_check_minutes: int = Field(ge=5, le=1440)
+    # P(official daily extreme - hourly-METAR extreme = d), keys as strings ("-1", "0", ...).
+    obs_offset_probs: dict[str, float] = Field(
+        default_factory=lambda: {"-1": 0.05, "0": 0.45, "1": 0.40, "2": 0.10}
+    )
+    # Local-standard-time hours of the daytime ramp: same-day confidence is halved inside
+    # [start, end) unless an official intraday CLI value exists (hourly obs lag a rising
+    # temperature). Quotes resume once the peak has passed.
+    ramp_start_hour: int = Field(default=10, ge=0, le=23)
+    ramp_end_hour: int = Field(default=16, ge=1, le=24)
+    stations: dict[str, StationModelCfg] = Field(default_factory=dict)
+
+    @field_validator("obs_offset_probs")
+    @classmethod
+    def _offsets(cls, v: dict[str, float]) -> dict[str, float]:
+        try:
+            keys = [int(k) for k in v]
+        except ValueError as e:
+            raise ValueError("obs_offset_probs keys must be integers as strings") from e
+        if any(not (-3 <= k <= 3) for k in keys):
+            raise ValueError("obs_offset_probs keys must be in [-3, 3]")
+        if abs(sum(v.values()) - 1.0) > 1e-6 or any(p < 0 for p in v.values()):
+            raise ValueError("obs_offset_probs must be non-negative and sum to 1")
+        return v
+
+    @field_validator("stations")
+    @classmethod
+    def _station_codes(cls, v: dict[str, StationModelCfg]) -> dict[str, StationModelCfg]:
+        bad = [k for k in v if not (k.startswith("CLI") and len(k) == 6 and k.isupper())]
+        if bad:
+            raise ValueError(f"weather.stations keys must be CLI codes like CLINYC, got {bad}")
+        return v
+
+    @model_validator(mode="after")
+    def _ramp(self) -> Self:
+        if not self.ramp_start_hour < self.ramp_end_hour:
+            raise ValueError("ramp_start_hour must be before ramp_end_hour")
+        return self
+
+    def offsets(self) -> dict[int, float]:
+        return {int(k): float(p) for k, p in self.obs_offset_probs.items()}
+
+
+class MarketBlendCfg(_Strict):
+    """How the quoted fair value is formed from the model and the REAL market (prod book).
+
+    fair_quote = weight * prod_mid + (1 - weight) * model, when the prod book is two-sided
+    and its spread is at most max_spread; otherwise the model alone (with `model_only_ok`)
+    or no quote. If |model - prod_mid| > max_disagreement the market is not quoted at all
+    and the disagreement is logged: an untuned model fading the whole market is how the
+    bot ended up short every favourite bracket on 2026-11-04.
+    """
+
+    weight: Decimal = Field(default=Decimal("0.6"), ge=0, le=1)
+    max_spread: Decimal = Field(default=Decimal("0.10"), ge=Decimal("0.01"), le=Decimal("0.5"))
+    max_disagreement: Decimal = Field(default=Decimal("0.15"), ge=Decimal("0.02"), le=1)
+    model_only_ok: bool = False  # quote on the model alone when there is no usable prod mid
+    max_ref_age_seconds: int = Field(default=1500, ge=60, le=7200)
+
+
+class SymmetricCfg(_Strict):
+    """Mode S, `symmetric`: rest a YES bid and a NO bid around the blended fair value, inside
+    the market spread, never crossing. The structural maker edge (resting orders earn the
+    spread and fade takers) is the only documented edge in these markets; this mode is how
+    the bot collects it without betting against the market's view.
+
+    half_spread: distance from fair to each quote (min; widened to stay inside the book)
+    min_market_spread_ticks: only quote when the book's own spread is at least this wide
+    max_inventory: contracts; past this on one side only the reducing quote is posted
+    skew_per_contract: shift both quotes away from the held side by this much per contract
+    """
+
+    enabled: bool = False
+    half_spread: Decimal = Field(default=Decimal("0.02"), ge=Decimal("0.005"), le=Decimal("0.2"))
+    min_market_spread_ticks: int = Field(default=3, ge=2, le=50)
+    max_inventory: Decimal = Field(default=Decimal("30"), gt=0, le=Decimal("5000"))
+    skew_per_contract: Decimal = Field(default=Decimal("0.001"), ge=0, le=Decimal("0.05"))
+    min_price: Decimal = Field(default=Decimal("0.05"), ge=Decimal("0.01"), le=Decimal("0.5"))
+    count: Decimal = Field(default=Decimal("1"), gt=0, le=Decimal("100"))
 
 
 class TradingCfg(_Strict):
@@ -223,6 +311,7 @@ class TradingCfg(_Strict):
     order is ever sent; the order manager runs dry and only records what it would do."""
 
     trading_enabled: bool = False
+    tilt_enabled: bool = True  # Mode A quotes (favourite / NO tilt); symmetric is separate
     order_count: Decimal = Field(gt=0, le=Decimal("100"))  # MINIMUM contracts per quote
     # Edge-scaled size: at edge == tilt.edge_buffer a quote is order_count contracts; it
     # grows linearly to risk.max_order_cost at edge >= edge_full_size, then is clipped to
@@ -294,6 +383,8 @@ class AppConfig(_Strict):
     weather: WeatherCfg
     trading: TradingCfg
     tilt: TiltCfg
+    blend: MarketBlendCfg = Field(default_factory=MarketBlendCfg)
+    symmetric: SymmetricCfg = Field(default_factory=SymmetricCfg)
     alerts: Alerts
     paths: Paths
     logging: LoggingCfg

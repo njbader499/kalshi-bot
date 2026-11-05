@@ -138,6 +138,27 @@ class PortfolioState:
             pos.qty = rest if signed > 0 else -rest
             pos.cost = unit * rest
 
+    def mark_to_market_v2(
+        self, yes_mark: Mapping[str, Decimal | None], haircut: Decimal
+    ) -> Decimal:
+        """Unrealized P&L with each position valued at a YES mark less a haircut (NO at
+        1 - mark less the haircut). A market with no mark is carried at cost (0 unrealized)
+        rather than at 0 value: an empty book is missing information, not a loss."""
+        u = ZERO
+        for t, p in self.positions.items():
+            if p.qty == 0:
+                continue
+            m = yes_mark.get(t)
+            if m is None:
+                continue
+            m = min(ONE, max(ZERO, m))
+            if p.qty > 0:
+                value = max(ZERO, m - haircut) * p.qty
+            else:
+                value = max(ZERO, (ONE - m) - haircut) * (-p.qty)
+            u += value - p.cost
+        return u
+
     def mark_to_market(
         self,
         yes_bid: Mapping[str, Decimal | None],

@@ -97,19 +97,45 @@ markets:
 # 2026-11-04); integer °F; NWS climate day in local standard time.
 weather:
   dst_rule_rechecked: false    # MUST be re-verified before 2027-03-14 (US DST); see DECISIONS.md
-  sigma_f: 2.0                 # spread around each ensemble member's daily max (untuned prior)
-  nws_weight: 0.3              # weight of the NWS point forecast in the mixture
-  nws_sigma_f: 2.5
-  bias_f: 0.0                  # to be calibrated from the shadow log
-  min_confidence: 0.6          # below this, Phase 4 will not quote
+  # Model v2 (2026-11-05): X = max(observed so far, forecast of the remaining hours). These
+  # globals are PRIORS; run scripts/calibrate_weather.py and paste its `stations:` block
+  # below to override them per city. bias_f = +1.0 because the hourly-sampled ensemble
+  # daily max ran 2-3F cold in 6 of 8 cities on 2026-11-04 (DECISIONS.md "Model v2").
+  sigma_f: 1.5                 # extra spread around each ensemble member's remaining extreme
+  nws_weight: 0.5              # weight of the NWS forecast (hourly max, lifted by the daily high)
+  nws_sigma_f: 2.0
+  bias_f: 1.0                  # added to every forecast component (F); provisional prior
+  min_confidence: 0.6          # below this, no quote
   fair_interval_minutes: 10
   settlement_check_minutes: 60
+  # P(official daily extreme - hourly-METAR extreme = d). The station's daily summary uses
+  # finer data than the hourly obs, so the official value is usually the hourly max or a
+  # degree above it. Re-fit from the shadow log by the calibration script.
+  obs_offset_probs: {"-1": 0.05, "0": 0.45, "1": 0.40, "2": 0.10}
+  # Local-standard-time daytime ramp: same-day confidence is halved inside it unless an
+  # official intraday CLI value exists (hourly obs lag a rising temperature).
+  ramp_start_hour: 10
+  ramp_end_hour: 16
+  stations: {}                 # e.g. {CLIMIA: {bias_f: 3.0, sigma_f: 1.2}} from the calibrator
+
+# Quoting fair value = blend of the MODEL and the REAL market (prod public book; on prod the
+# live book). A market where the model disagrees with the market by more than
+# max_disagreement is NOT quoted (and listed under "not quoted" in /status): on 2026-11-04 an
+# untuned model priced the favourite brackets at 0.11-0.22 against a market at 0.5-0.76 and
+# the bot went short every one of them.
+blend:
+  weight: "0.6"                # share of the market mid in the quoted fair
+  max_spread: "0.10"           # prod book wider than this is not a usable reference
+  max_disagreement: "0.15"
+  model_only_ok: false         # never quote on the model alone without a usable reference
+  max_ref_age_seconds: 1500
 
 # Order placement (Phase 4). TRADING IS OFF. The owner flips trading_enabled after reviewing
 # the calibration report. While false, the order manager runs dry: it records what it WOULD
 # do in the ledger (shadow_orders) and never sends anything to Kalshi.
 trading:
   trading_enabled: false
+  tilt_enabled: true
   order_count: "1"               # contracts per quote (tiny while on demo)
   edge_full_size: "0.12"        # size scales with edge: 1 contract at the 2c buffer, up to max_order_cost at 12c edge
   count_hysteresis_pct: 25       # only resize a resting quote on a >= 25% change
@@ -118,6 +144,20 @@ trading:
   min_seconds_between_amends: 20
 
 # Mode A tilt (Section 3): rest bids only on the side the bias favors.
+# Mode S, `symmetric` (Section 3 / strategy/symmetric.py): a YES bid and a NO bid around the
+# blended fair, inside the book, never crossing. This is the maker edge the research found
+# (resting orders earn the spread and fade takers); it does not bet against the market.
+symmetric:
+  enabled: true
+  half_spread: "0.02"          # each quote sits this far from fair (min; widened by the book)
+  min_market_spread_ticks: 3   # only quote when the book's own spread leaves room
+  max_inventory: "30"          # contracts; past this only the reducing side is quoted
+  skew_per_contract: "0.001"   # shift both quotes away from the held side, per contract
+  min_price: "0.05"            # no quotes below 5c or above 95c
+  count: "1"                   # contracts per quote (edge-scaled up to risk.max_order_cost)
+
+# Mode A, `tilt`: one-sided bids where the blended fair is extreme (favourite YES / longshot
+# NO). Used in markets where symmetric has no room. Switch with trading.tilt_enabled.
 tilt:
   edge_buffer: "0.02"
   favorite_threshold: "0.70"     # bid YES when fair >= 0.70

@@ -3,7 +3,10 @@
 Current state of the Kalshi maker bot, for whoever picks this up next (human or Claude).
 Spec: `KALSHI_MAKER_BOT_PROMPT.md`. Every decision and doc conflict: `DECISIONS.md`.
 
-_Last updated: 2026-11-04 21:50Z (DEMO trading ON; Telegram live; kill switch verified)._
+_Last updated: 2026-11-05 (cloud session): model v2, market blend, symmetric quoting on
+branch `cloud/weather-model-fixes` — see "Merging the model fixes" below. Trading on the
+laptop was HALTED by the risk stops at 2026-11-05 06:01Z (phantom loss, see DECISIONS.md
+"Model v2") and the collector was stopped by Ctrl+C at 13:06Z._
 
 ## Where things stand
 
@@ -20,6 +23,25 @@ _Last updated: 2026-11-04 21:50Z (DEMO trading ON; Telegram live; kill switch ve
 Environment: owner's Windows 11 laptop in Prague (Kalshi reachable directly; never add
 VPN/proxy/geolocation workarounds). `ENV=demo`, `LOCATION_OK=false`. Demo account
 funded with $500. API tier Basic.
+
+## Merging the model fixes (laptop, 2026-11-05)
+
+1. Commit or stash local edits, then `git fetch origin` and
+   `git merge origin/cloud/weather-model-fixes` (docs may conflict on line endings only).
+2. `powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1` — 362 tests, ruff, mypy.
+3. Update the LOCAL `config/config.yaml` from `config/config.example.yaml`: new `weather`
+   keys (`obs_offset_probs`, `ramp_*`, `stations`, and the new prior values sigma 1.5 /
+   nws_weight 0.5 / bias_f 1.0), new `blend:` and `symmetric:` sections,
+   `trading.tilt_enabled`. All new keys have defaults, so the old file still loads, but the
+   old sigma/weight/bias values would keep the old behaviour.
+4. `.\.venv\Scripts\python.exe scripts\calibrate_weather.py --days 365 --out config\weather_calibration.yaml`
+   and paste its `stations:` block (and `obs_offset_probs` once it has data) under
+   `weather:` in config.yaml. Check the NCEI station names it prints.
+5. `python -m kalshi_maker fair` and compare the fair values with the prod bid/ask: the
+   leading bracket should now be near the market, and "not quoted" reasons should be rare.
+6. `python -m kalshi_maker risk-reset --confirm`, delete `KILL` if present, restart the
+   collector (`scripts\start-collector.ps1`), confirm the Telegram "bot started" alert and
+   that /status shows realized/unrealized separately and a "not quoted:" line.
 
 ## How to run
 

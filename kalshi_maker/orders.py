@@ -3,7 +3,8 @@
 Per market, each loop:
   * nothing wanted (or quoting not allowed)  -> cancel every bot order there
   * wanted, none resting                     -> create (after RiskManager.check_new)
-  * wanted, resting on the other side        -> cancel it, create the new one
+  * wanted on one side only, resting other   -> cancel it, create the new one
+  * wanted on both sides (symmetric mode)    -> each side diffed on its own
   * wanted, resting on the same side         -> keep it; amend the price only if it moved
                                                 >= hysteresis_ticks AND the amend cooldown
                                                 has passed (amends lose queue priority)
@@ -194,37 +195,51 @@ class OrderManager:
     # ---- the diff ----
     async def sync(
         self,
-        desired: Mapping[str, DesiredQuote | None],
+        desired: Mapping[str, DesiredQuote | list[DesiredQuote] | None],
         grids: Mapping[str, TickGrid],
         can_quote: bool,
     ) -> None:
+        """`desired[ticker]` is None, one quote, or a list with at most one quote per side
+        (a symmetric pair is a `bid` and an `ask`). Each (market, side) is diffed on its own."""
         tickers = set(desired) | self.pf.quoted_markets()
         for t in sorted(tickers):
             live = self.pf.resting_for(t)
-            want = desired.get(t) if can_quote and t not in self.blocked else None
-            if want is None:
+            raw = desired.get(t) if can_quote and t not in self.blocked else None
+            wants: dict[str, DesiredQuote] = {}
+            if isinstance(raw, DesiredQuote):
+                wants[raw.side] = raw
+            elif raw:
+                for q in raw:
+                    wants[q.side] = q  # last one per side wins
+            if not wants:
                 for o in live:
                     await self._cancel(o, "no longer wanted" if can_quote else "quoting disabled")
                 continue
-            same = [o for o in live if o.side == want.side]
-            for o in [o for o in live if o.side != want.side] + same[1:]:
-                await self._cancel(o, "wrong side / duplicate")
             grid = grids.get(t)
-            if grid is None:
-                for o in same[:1]:
-                    await self._cancel(o, "no tick grid")
-                continue
-            if not same:
-                await self._create(want, grid)
-                continue
-            o = same[0]
-            tick = grid.tick_at(o.price)
-            moved = abs(want.price - o.price)
-            resize = abs(want.count - o.remaining)
-            pct = Decimal(self.trading.count_hysteresis_pct) / 100
-            big_resize = resize > 0 and resize >= max(Decimal(1), o.remaining * pct)
-            if moved >= tick * max(1, self.tilt.hysteresis_ticks) or big_resize:
-                await self._amend(o, want)
+            for side in ("bid", "ask"):
+                same = [o for o in live if o.side == side]
+                want = wants.get(side)
+                if want is None:
+                    for o in same:
+                        await self._cancel(o, "no longer wanted on this side")
+                    continue
+                for o in same[1:]:
+                    await self._cancel(o, "duplicate")
+                if grid is None:
+                    for o in same[:1]:
+                        await self._cancel(o, "no tick grid")
+                    continue
+                if not same:
+                    await self._create(want, grid)
+                    continue
+                o = same[0]
+                tick = grid.tick_at(o.price)
+                moved = abs(want.price - o.price)
+                resize = abs(want.count - o.remaining)
+                pct = Decimal(self.trading.count_hysteresis_pct) / 100
+                big_resize = resize > 0 and resize >= max(Decimal(1), o.remaining * pct)
+                if moved >= tick * max(1, self.tilt.hysteresis_ticks) or big_resize:
+                    await self._amend(o, want)
 
     async def cancel_all(self, reason: str) -> int:
         n = 0

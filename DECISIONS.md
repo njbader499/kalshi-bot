@@ -520,6 +520,81 @@ weekly $60, drawdown $100), and edge and confidence filters unchanged. Changes:
   which pydantic doesn't wrap, so a typo would have crashed startup instead of being
   refused. It now raises a clean config error.
 
+## Model v2 + market blend + symmetric quoting (cloud session, 2026-11-05)
+
+Branch `cloud/weather-model-fixes`, written from the first night of demo data (ledger
+snapshot 2026-11-04 20:27Z → 2026-11-05 13:02Z, 7,164 fair values, 34 fills).
+
+### What the data showed
+
+1. **The v1 engine never let a day end.** It conditioned the full-day forecast on "max so
+   far ≥ B" by dropping the mass below B and renormalising, so the tail above B stayed
+   large however late it was. NYC 2026-11-04 at 23:00 local with the high already 72:
+   v1 said 72-73 = 0.62, 74-75 = 0.31, 76-77 = 0.07. The real market was at 0.99 on 72-73
+   from ~16:00 local in every city. Paired Brier on the eight Nov 4 events, local 17:00-23:00
+   (2,028 bracket snapshots): **v1 0.058, market 0.000**. Every evening fill the bot made
+   (NYC 72-73 at 54-62c, Miami 85-86 at 34c, NYC NOT 70-71 at 71c) was against a stale demo
+   price; at real prices (0.99 / 0.99 / 0.01) none of them would have filled.
+2. **The raw ensemble daily max ran cold.** Ensemble p50 vs the settled high, same-day 12Z
+   run: CHI 66.1→69/70, DEN 54.6→56/57, MIA 82.0→85, BOS 74.1→77, DAL 72.5→76, ATL
+   71.0→71/72, NYC 72.0→72, LAX 76.4→75. Six of eight cold by 2-3F. Hourly-sampled
+   maxima miss the peak and a 25 km grid cell blends in water/terrain; the NWS forecast
+   (forecaster-adjusted) sat much closer to the market.
+3. **sigma 2.0 on top of the ensemble spread made the distribution too flat**, so the
+   favourite bracket got 0.2-0.3 where the market had 0.45-0.76, and the tilt rule
+   ("NO when fair ≤ 0.30") shorted the market's favourite in six cities (MIA 86-87 fair
+   0.11 vs market 0.76; DAL 79-80 0.14 vs 0.60; DEN 58-59 0.18 vs 0.57; BOS 74-75 0.18 vs
+   0.53; LAX 79-80 0.21 vs 0.45). Those fills, marked at prod prices when made, were
+   worth about −$16.
+4. **The risk stops fired on a phantom loss.** At 06:01Z the drawdown (107 ≥ 100) and
+   weekly (98.41) stops tripped with **zero settlements**: 98.41 was exactly the cost
+   basis of the open positions, marked at 0 because the demo book had no bids. Kalshi's
+   own portfolio value put the same positions at $92.
+
+### What changed (all unit-tested; risk limits unchanged)
+
+- **weather/model.py, engine.py — model v2.** X = max(B, Y): B is the reported extreme of
+  the hours already observed (hourly obs → offset table `obs_offset_probs`, floored by an
+  intraday CLI value; an official value that the obs have not passed is exact), Y is the
+  forecast extreme over the REMAINING hours only (ensemble members' remaining-window
+  extremes + NWS). Mass of Y that cannot beat B collapses onto B. Replayed on the same
+  Nov 4 observations: **Brier 0.031 vs v1 0.058** (market 0.000; the rest of the gap is
+  the hourly obs not knowing the official running max to the degree — a data problem:
+  the official is the hourly max in ~45% of cases and one degree above in ~40%).
+  Per-station `bias_f`/`sigma_f` (config `weather.stations`), NWS daily high lifts the NWS
+  component before local noon, `nws_weight` 0.3→0.5, `sigma_f` 2.0→1.5, `bias_f` 0→+1.0
+  (provisional prior from the table above; the calibrator replaces it). Confidence is
+  halved only inside the daytime ramp (10:00-16:00 LST, configurable) without an official
+  intraday value; after the peak it is quotable.
+- **trading.py — market blend + disagreement guard.** Quoted fair = 0.6·prod mid +
+  0.4·model when the prod book is two-sided and ≤ 10c wide; otherwise no quote (no
+  model-only quoting by default). |model − mid| > 0.15 → not quoted, reason in /status
+  ("not quoted:"). On prod the live book is the reference; on demo the prod snapshot
+  stored with each fair value is.
+- **strategy/symmetric.py — Mode S.** YES bid at fair − 2c and NO bid at (1 − fair) − 2c,
+  inside the book, only when the book's spread is ≥ 3 ticks, inventory skew with the
+  reducing side allowed to give up at most half its edge, cap 30 contracts a side. The
+  order manager now diffs per (market, side) and a symmetric pair is two resting orders.
+  Tilt still runs where symmetric has no room (`trading.tilt_enabled`).
+- **portfolio.mark_to_market_v2 / trading.marks** — positions marked at the reference mid
+  (or blended fair) less a 2c haircut; no mark → carried at cost. /status shows realized
+  and unrealized separately. The Nov 5 false stop would not have fired.
+- **scripts/calibrate_weather.py + weather/fit.py** — Open-Meteo historical forecasts vs
+  NCEI GHCN-Daily TMAX per station → `bias_f`/`sigma_f`; offset table from the shadow log.
+  Must run on the laptop (the cloud sandbox cannot reach those hosts). Nothing is applied
+  automatically; it writes a YAML fragment to paste into config.yaml.
+
+### Still open
+
+- **Better "so far" data.** The market knows the official running high within minutes
+  (The Weather Company's "hi so far" / sub-hourly ASOS). Options to evaluate: Iowa State
+  Mesonet 1-minute ASOS feed (public, academic), or a legitimate TWC source. This is the
+  single biggest remaining edge on same-day markets.
+- `bias_f: 1.0` is a one-day prior; replace it with the calibrator's per-station fit.
+- Demo fills are not evidence of edge (prod-realism report still to do).
+- NO-side settlement netting: a YES and a NO fill in the same market net on Kalshi;
+  `apply_fill` realises the pair. Verify on demo with a symmetric fill pair.
+
 ## Design choices (Phase 1)
 
 - **Layout.** The repo root is the spec's `kalshi_maker/` directory, and the spec's `bot/`

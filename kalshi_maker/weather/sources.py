@@ -7,8 +7,10 @@
        temperature_2m_ncep_gefs_seamless (control), temperature_2m_memberNN_ncep_gefs_seamless
        (30), temperature_2m_ecmwf_ifs025_ensemble (control), ..._memberNN_ecmwf_ifs025_ensemble
        (50). 82 series in total.
-  * NWS: /points/{lat},{lon} -> properties.forecastHourly; that URL -> properties.periods[]
-    {startTime (ISO with offset), temperature (int), temperatureUnit "F"}.
+  * NWS: /points/{lat},{lon} -> properties.forecastHourly and properties.forecast; either
+    URL -> properties.periods[] {startTime (ISO with offset), temperature (int),
+    temperatureUnit "F"}; the daily product's periods also carry isDaytime (True = the
+    period whose temperature is the day's forecast HIGH, False = the night's LOW).
   * NWS observations: /stations/{id}/observations?start&end -> features[].properties
     {timestamp, temperature {value °C, qualityControl}}.
   * NWS CLI: /products/types/CLI/locations/{loc} -> @graph[] {@id, issuanceTime};
@@ -22,9 +24,9 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -132,30 +134,64 @@ class WeatherSources:
         return out
 
     # ---- NWS hourly forecast ----
+    async def _point_urls(self, st: Station) -> dict[str, str]:
+        now = self._clock()
+        urls = self._points.get(st.cli_code, now)
+        if urls is None:
+            p = await self._get(f"{NWS}/points/{st.lat:.4f},{st.lon:.4f}")
+            props = p["properties"]
+            urls = {"hourly": props["forecastHourly"], "daily": props["forecast"]}
+            self._points.put(st.cli_code, urls, now)
+        return urls  # type: ignore[no-any-return]
+
+    @staticmethod
+    def _period_temp_f(per: Mapping[str, Any]) -> float | None:
+        t = per.get("temperature")
+        if isinstance(t, dict):  # some NWS responses use a quantitative value object
+            t = t.get("value")
+        if t is None:
+            return None
+        unit = per.get("temperatureUnit", "F")
+        return float(t) if unit == "F" else float(t) * 9 / 5 + 32
+
     async def nws_hourly(self, st: Station) -> list[tuple[datetime, float]]:
         now = self._clock()
         hit = self._nws.get(st.cli_code, now)
         if hit is not None:
             return hit  # type: ignore[no-any-return]
-        url = self._points.get(st.cli_code, now)
-        if url is None:
-            p = await self._get(f"{NWS}/points/{st.lat:.4f},{st.lon:.4f}")
-            url = p["properties"]["forecastHourly"]
-            self._points.put(st.cli_code, url, now)
-        d = await self._get(url)
+        d = await self._get((await self._point_urls(st))["hourly"])
         out: list[tuple[datetime, float]] = []
         for per in d["properties"]["periods"]:
-            t = per.get("temperature")
-            if t is None:
-                continue
-            if isinstance(t, dict):  # some NWS responses use a quantitative value object
-                t = t.get("value")
-                if t is None:
-                    continue
-            unit = per.get("temperatureUnit", "F")
-            tf = float(t) if unit == "F" else float(t) * 9 / 5 + 32
-            out.append((_utc(per["startTime"]), tf))
+            tf = self._period_temp_f(per)
+            if tf is not None:
+                out.append((_utc(per["startTime"]), tf))
         self._nws.put(st.cli_code, out, now)
+        return out
+
+    async def nws_daily(self, st: Station) -> dict[date, tuple[float | None, float | None]]:
+        """{local calendar date: (forecast high, forecast low)} from the NWS daily product.
+
+        The high is the isDaytime period starting on that date; the low is the night period
+        starting on that date (which runs into the next morning, as the NWS defines it)."""
+        now = self._clock()
+        key = (st.cli_code, "daily")
+        hit = self._nws.get(key, now)
+        if hit is not None:
+            return hit  # type: ignore[no-any-return]
+        d = await self._get((await self._point_urls(st))["daily"])
+        out: dict[date, tuple[float | None, float | None]] = {}
+        for per in d["properties"]["periods"]:
+            tf = self._period_temp_f(per)
+            if tf is None:
+                continue
+            local_day = datetime.fromisoformat(per["startTime"]).date()
+            hi, lo = out.get(local_day, (None, None))
+            if per.get("isDaytime", True):
+                hi = tf if hi is None else max(hi, tf)
+            else:
+                lo = tf if lo is None else min(lo, tf)
+            out[local_day] = (hi, lo)
+        self._nws.put(key, out, now)
         return out
 
     # ---- observations ----

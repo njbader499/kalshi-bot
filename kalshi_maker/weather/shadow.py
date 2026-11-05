@@ -52,10 +52,28 @@ class Row:
 
 def make_engine(cfg: AppConfig, sources: WeatherSources) -> WeatherEngine:
     w = cfg.weather
+    offsets = w.offsets()
     params = ModelParams(
-        sigma_f=w.sigma_f, nws_weight=w.nws_weight, nws_sigma_f=w.nws_sigma_f, bias_f=w.bias_f
+        sigma_f=w.sigma_f, nws_weight=w.nws_weight, nws_sigma_f=w.nws_sigma_f, bias_f=w.bias_f,
+        obs_offsets=offsets,
+    )  # fmt: skip
+    per_station = {
+        code: ModelParams(
+            sigma_f=w.sigma_f if o.sigma_f is None else o.sigma_f,
+            nws_weight=w.nws_weight if o.nws_weight is None else o.nws_weight,
+            nws_sigma_f=w.nws_sigma_f if o.nws_sigma_f is None else o.nws_sigma_f,
+            bias_f=w.bias_f if o.bias_f is None else o.bias_f,
+            obs_offsets=offsets,
+        )
+        for code, o in w.stations.items()
+    }
+    return WeatherEngine(
+        sources,
+        params,
+        dst_rule_rechecked=w.dst_rule_rechecked,
+        station_params=per_station,
+        ramp_hours=(w.ramp_start_hour, w.ramp_end_hour),
     )
-    return WeatherEngine(sources, params, dst_rule_rechecked=w.dst_rule_rechecked)
 
 
 def local_std_today(c: WeatherContract, now: datetime) -> date:

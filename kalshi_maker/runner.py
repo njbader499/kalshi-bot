@@ -99,6 +99,8 @@ class Runner:
             self.notifier = Notifier(None, frozenset(), 3600)
         self.watchdog: Watchdog | None = None
         self.trading = TradingLoop(self.settings.config, self.ledger, api=self.api)
+        # On prod the live book is the real market; on demo the prod public snapshot is.
+        self.trading.live_book_is_real = self.settings.env.value == "prod"
         safety = self.settings.config.safety
         self.monitor = ContinuityMonitor(safety.clock_jump_seconds, safety.loop_stall_seconds)
         self.gate = SafetyGate(
@@ -127,9 +129,14 @@ class Runner:
             describe_mode(self.settings.config),
             f"gate: {self.gate.state.value}  paused: {tl.paused}  "
             f"risk: {tl.risk.can_trade().reason or 'ok'}",
-            f"equity proxy: {eq:.2f}  P&L today: {day_pnl:+.2f}",
+            f"equity proxy: {eq:.2f} (realized {tl.pf.realized - tl.pf.fees:+.2f}, "
+            f"unrealized {tl.unrealized(books):+.2f})  P&L today: {day_pnl:+.2f}",
             f"exposure by category: {', '.join(f'{k} {v:.2f}' for k, v in cats.items()) or 'none'}",
             f"markets quoted: {', '.join(sorted(tl.pf.quoted_markets())) or 'none'}",
+            "not quoted: " + (", ".join(
+                f"{t.split('-', 1)[-1]} ({why.split(' ')[0]})"
+                for t, why in sorted(tl.skipped.items())
+            )[:300] or "none"),
             self._status_line() if self.ws else "websocket not started",
         ]
         return "\n".join(lines)
@@ -320,7 +327,7 @@ class Runner:
                 assert row.fair is not None
                 self.trading.update_fair(
                     row.contract.ticker, row.fair.p, row.fair.confidence,
-                    row.fair.as_of.timestamp(),
+                    row.fair.as_of.timestamp(), ref_bid=row.yes_bid, ref_ask=row.yes_ask,
                 )  # fmt: skip
             say(f"shadow: logged {n} fair values ({len(rows) - len(priced)} not priced)")
         except Exception as e:
