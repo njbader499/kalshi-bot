@@ -67,12 +67,32 @@ def _check_offsets(offsets: Mapping[int, float]) -> dict[int, float]:
     return {int(d): float(p) for d, p in offsets.items() if p > 0}
 
 
+MODEL_KEYS = ("gfs", "ecmwf")
+
+
+def model_of_member(member_key: str) -> str | None:
+    """Which ensemble a member series belongs to, from its Open-Meteo series name
+    (e.g. 'temperature_2m_member03_ncep_gefs_seamless', 'temperature_2m_ecmwf_ifs025_ensemble')."""
+    k = member_key.lower()
+    if "ecmwf" in k:
+        return "ecmwf"
+    if "gfs" in k or "gefs" in k:
+        return "gfs"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ModelParams:
     sigma_f: float = 1.5  # spread added around each ensemble member's remaining extreme
     nws_weight: float = 0.5
     nws_sigma_f: float = 2.0
-    bias_f: float = 0.0  # added to every forecast component; fit per station (see config)
+    # Bias (F) added to ENSEMBLE MEMBERS only: the raw global models run cold/warm at a
+    # station (resolution, coast, hourly sampling). Per model when fitted (bias_by_model,
+    # keys 'gfs'/'ecmwf'), else bias_f. The NWS forecast is forecaster-adjusted and gets
+    # nws_bias_f (default 0): calibrating it against raw-model residuals double-counted.
+    bias_f: float = 0.0
+    bias_by_model: dict[str, float] = field(default_factory=dict)
+    nws_bias_f: float = 0.0
     obs_slack_p: float = 0.05  # kept for v1 helpers; v2 uses obs_offsets
     obs_offsets: dict[int, float] = field(default_factory=lambda: dict(DEFAULT_OBS_OFFSETS))
 
@@ -85,26 +105,46 @@ class ModelParams:
             raise ValueError("nws_weight must be in [0, 1]")
         if not (0 <= self.obs_slack_p < 0.5):
             raise ValueError(f"obs_slack_p {self.obs_slack_p} out of bounds [0, 0.5)")
-        if not (-5 <= self.bias_f <= 5):
-            raise ValueError(f"bias_f {self.bias_f} out of bounds [-5, 5]")
+        for name, b in (("bias_f", self.bias_f), ("nws_bias_f", self.nws_bias_f)):
+            if not (-6 <= b <= 6):
+                raise ValueError(f"{name} {b} out of bounds [-6, 6]")
+        for k, b in self.bias_by_model.items():
+            if k not in MODEL_KEYS:
+                raise ValueError(f"bias_by_model key {k!r} not in {MODEL_KEYS}")
+            if not (-6 <= b <= 6):
+                raise ValueError(f"bias_by_model[{k}] {b} out of bounds [-6, 6]")
         object.__setattr__(self, "obs_offsets", _check_offsets(self.obs_offsets))
+
+    def bias_for(self, member_key: str) -> float:
+        m = model_of_member(member_key)
+        if m is not None and m in self.bias_by_model:
+            return self.bias_by_model[m]
+        return self.bias_f
 
 
 def integer_distribution(
     members: Sequence[float],
     nws: float | None,
     p: ModelParams,
+    member_biases: Sequence[float] | None = None,
 ) -> Dist:
-    """Integer distribution of a forecast extreme Y from ensemble members and/or NWS."""
+    """Integer distribution of a forecast extreme Y from ensemble members and/or NWS.
+
+    `member_biases` (one per member, from ModelParams.bias_for) overrides the flat bias_f.
+    The NWS component gets nws_bias_f only.
+    """
     comps: list[tuple[float, float, float]] = []  # (weight, mu, sigma)
     w_nws = p.nws_weight if nws is not None else 0.0
     if not members and nws is None:
         raise ValueError("no forecast inputs")
     if members:
+        if member_biases is not None and len(member_biases) != len(members):
+            raise ValueError("member_biases must match members")
+        biases = member_biases if member_biases is not None else [p.bias_f] * len(members)
         w_each = (1.0 - w_nws) / len(members) if nws is not None else 1.0 / len(members)
-        comps += [(w_each, m + p.bias_f, p.sigma_f) for m in members]
+        comps += [(w_each, m + b, p.sigma_f) for m, b in zip(members, biases, strict=True)]
     if nws is not None:
-        comps.append((w_nws if members else 1.0, nws + p.bias_f, p.nws_sigma_f))
+        comps.append((w_nws if members else 1.0, nws + p.nws_bias_f, p.nws_sigma_f))
     lo = math.floor(min(mu - 6 * s for _, mu, s in comps))
     hi = math.ceil(max(mu + 6 * s for _, mu, s in comps))
     dist: Dist = {}

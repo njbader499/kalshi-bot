@@ -7,10 +7,15 @@ Run on the laptop (it needs Open-Meteo, NCEI and the local ledger):
         --out config\\weather_calibration.yaml
 
 Data:
-  * Forecasts: Open-Meteo Historical Forecast API, daily temperature_2m_max/min per model
-    (gfs_seamless, ecmwf_ifs025), i.e. the same hourly-sampled daily extreme the live bot
-    builds from the ensemble, for the station coordinates, in the station's LOCAL STANDARD
-    time (fixed offset, the NWS climate day).
+  * Forecasts: Open-Meteo Historical Forecast API, daily temperature_2m_max/min per model,
+    i.e. the same hourly-sampled daily extreme the live bot builds from the ensemble, for
+    the station coordinates, in the station's LOCAL STANDARD time (fixed offset, the NWS
+    climate day). Models: `gfs_global` (plain GFS; NOT `gfs_seamless`, which blends in the
+    3 km HRRR for the US and does not represent the GEFS members the bot uses; falls back to
+    gfs_seamless if the API rejects gfs_global) and `ecmwf_ifs025` (matches the ENS members).
+  * Two windows are fitted: the full --days window and the last --recent-days (default
+    90). Biases can be seasonal (a coastal marine layer, say), so the YAML uses the recent
+    window when it has at least 60 days; both are printed.
   * Actuals: NCEI GHCN-Daily (dataset daily-summaries) TMAX/TMIN for the first-order
     station, units=standard (F). This is the official daily extreme the NWS climate
     report carries. Station ids below are the GHCN ids of the settlement stations; the
@@ -39,6 +44,7 @@ from kalshi_maker.weather.fit import (
     StationFit,
     calibration_yaml,
     fit_station,
+    model_key,
     offset_table,
 )
 from kalshi_maker.weather.model import DEFAULT_OBS_OFFSETS
@@ -67,6 +73,9 @@ def lst_tz(offset_hours: int) -> str:
     return f"Etc/GMT{'+' if offset_hours < 0 else '-'}{abs(offset_hours)}"
 
 
+FALLBACK_MODELS = {"gfs_global": "gfs_seamless"}
+
+
 def fetch_forecasts(
     client: httpx.Client, code: str, models: list[str], start: date, end: date, kind: str
 ) -> dict[str, dict[str, float]]:
@@ -74,19 +83,26 @@ def fetch_forecasts(
     var = "temperature_2m_max" if kind == "max" else "temperature_2m_min"
     out: dict[str, dict[str, float]] = {}
     for m in models:
-        r = client.get(
-            OPEN_METEO,
-            params={
-                "latitude": st.lat, "longitude": st.lon, "daily": var, "models": m,
-                "start_date": start.isoformat(), "end_date": end.isoformat(),
-                "temperature_unit": "fahrenheit", "timezone": lst_tz(st.lst_offset_hours),
-            },
-        )  # fmt: skip
-        r.raise_for_status()
+        tried = m
+        while True:
+            r = client.get(
+                OPEN_METEO,
+                params={
+                    "latitude": st.lat, "longitude": st.lon, "daily": var, "models": tried,
+                    "start_date": start.isoformat(), "end_date": end.isoformat(),
+                    "temperature_unit": "fahrenheit", "timezone": lst_tz(st.lst_offset_hours),
+                },
+            )  # fmt: skip
+            if r.status_code == 400 and tried in FALLBACK_MODELS:
+                print(f"   model {tried} rejected by Open-Meteo; using {FALLBACK_MODELS[tried]}")
+                tried = FALLBACK_MODELS[tried]
+                continue
+            r.raise_for_status()
+            break
         d = r.json()
         days = d["daily"]["time"]
         vals = d["daily"][var]
-        out[m] = {t: float(v) for t, v in zip(days, vals, strict=True) if v is not None}
+        out[tried] = {t: float(v) for t, v in zip(days, vals, strict=True) if v is not None}
     return out
 
 
@@ -144,7 +160,8 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--days", type=int, default=365)
-    ap.add_argument("--models", default="gfs_seamless,ecmwf_ifs025")
+    ap.add_argument("--recent-days", type=int, default=90)
+    ap.add_argument("--models", default="gfs_global,ecmwf_ifs025")
     ap.add_argument("--stations", default=",".join(GHCN_IDS))
     ap.add_argument("--kind", choices=["max", "min"], default="max")
     ap.add_argument("--ledger", default="data/ledger.db")
@@ -167,15 +184,24 @@ def main() -> int:
             except Exception as e:
                 print(f"{code}: fetch failed: {e!r}")
                 continue
-            f = fit_station(code, actual, fc)
-            fits.append(f)
+            full = fit_station(code, actual, fc)
+            cut = (end - timedelta(days=args.recent_days)).isoformat()
+            recent = fit_station(
+                code, {d: v for d, v in actual.items() if d >= cut},
+                {m: {d: v for d, v in f_.items() if d >= cut} for m, f_ in fc.items()},
+            )  # fmt: skip
+            use = recent if recent.n >= 60 else full
+            fits.append(use)
             print(f"\n== {code} {STATIONS[code].name}  NCEI station: {name}")
-            print(f"   days={f.n}  bias(actual-forecast)={f.bias_f:+.1f}F  mae={f.mae}  "
-                  f"resid_sd={f.resid_sd}")  # fmt: skip
-            print(f"   -> suggested bias_f={f.bias_f} sigma_f={f.sigma_f}")
-            for m, (n, b, mae) in f.by_model.items():
-                print(f"   {m:<16} n={n:<4} bias={b:+.2f}  mae={mae}")
-            if not f.usable:
+            for label, f in ((f"last {args.days}d", full), (f"last {args.recent_days}d", recent)):
+                per_model = "  ".join(
+                    f"{model_key(m) or m}={b:+.2f}" for m, (_, b, _) in f.by_model.items()
+                )
+                print(f"   {label:<10} days={f.n:<4} bias={f.bias_f:+.1f}F  mae={f.mae}  "
+                      f"resid_sd={f.resid_sd}  sigma_f={f.sigma_f}  {per_model}")  # fmt: skip
+            print(f"   -> using the {'recent' if use is recent else 'full'} window: "
+                  f"bias_f={use.bias_f} {use.bias_by_key()} sigma_f={use.sigma_f}")  # fmt: skip
+            if not use.usable:
                 print("   (not enough days to use)")
 
     pairs = offsets_from_ledger(Path(args.ledger))

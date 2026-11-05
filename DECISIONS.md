@@ -584,6 +584,32 @@ snapshot 2026-11-04 20:27Z → 2026-11-05 13:02Z, 7,164 fair values, 34 fills).
   Must run on the laptop (the cloud sandbox cannot reach those hosts). Nothing is applied
   automatically; it writes a YAML fragment to paste into config.yaml.
 
+### Second pass (same day, after the laptop's first calibration run)
+
+The laptop's first `calibrate_weather.py` run (365 days, all eight NCEI station names
+correct) exposed two mistakes in the first cut, both caught by the laptop session:
+
+1. `bias_f` was added to the NWS component too. The fit measured raw-model residuals, and
+   the NWS forecast is already forecaster-adjusted, so Miami's NWS 86 became ~88 and the
+   mixture split into two humps (84-85 at 0.46, 88-89 at 0.18 against a market at 0.78 on
+   86-87). Now: bias goes to ensemble members only; `nws_bias_f` is a separate knob at 0.
+2. The combined bias averaged GFS and ECMWF equally and the GFS feed was `gfs_seamless`,
+   which blends the 3 km HRRR into US forecasts; the live ensemble is 31 GEFS + 51 ECMWF
+   members with no HRRR. LAX came out at −2.4 from GFS +0.28 / ECMWF −5.11. Now: each
+   model's bias is applied to its own members (`bias_gfs_f`, `bias_ecmwf_f`;
+   `ModelParams.bias_by_model`, matched on the Open-Meteo series name), the combined
+   `bias_f` is member-weighted 31:51, and the calibrator uses `gfs_global` (plain GFS,
+   falling back to gfs_seamless if rejected). It also fits the last 90 days separately and
+   uses that window when it has ≥ 60 days, because a coastal bias is seasonal.
+
+The first run's numbers, for the record (365 d, actual − forecast, GFS-with-HRRR / ECMWF):
+NYC −0.60/+0.15, MIA +1.24/+2.49, CHI +0.48/+0.94, LAX +0.28/−5.11, ATL +1.23/+2.31,
+BOS +0.76/+0.43, DFW +0.73/+2.31, DEN +1.03/+0.47. ECMWF 0.25° is 5 °F warm at LAX (the
+grid cell is inland of the marine layer); the models are 1-2.5 °F cold at the humid
+south-eastern stations. `sigma_f` floors were hit everywhere (residual sd ≈ 1.4-1.5 °F
+after bias), so the ensemble's own spread plus a small sigma is about right; the floor is
+now 0.7 with the ensemble's own sd taken as 1.0.
+
 ### Still open
 
 - **Better "so far" data.** The market knows the official running high within minutes

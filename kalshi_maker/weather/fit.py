@@ -4,10 +4,12 @@ scripts/calibrate_weather.py so they can be run on the laptop, which can reach t
 Two things are fitted:
 
 1. Per-station forecast bias and spread. For each past day, the forecast daily extreme
-   (Open-Meteo historical forecast, same hourly-sampled quantity the bot uses) is compared
-   with the official value (NCEI GHCN-Daily TMAX/TMIN = the NWS climate report). The mean
-   residual is `bias_f`; the residual spread, less the part the live ensemble already
-   expresses, is `sigma_f`.
+   (Open-Meteo historical forecast, same hourly-sampled quantity the bot uses, from the
+   deterministic runs of the SAME models whose ensembles the bot uses) is compared with
+   the official value (NCEI GHCN-Daily TMAX/TMIN = the NWS climate report). The mean
+   residual per model is that model's member bias; the member-weighted combination is
+   `bias_f`; the residual spread, less the part the live ensemble already expresses, is
+   `sigma_f`. The NWS forecast is NOT calibrated this way (it is forecaster-adjusted).
 2. The observation offset table: P(official extreme - hourly-METAR extreme = d), from the
    bot's own shadow log (obs_f at the last snapshot before the final CLI vs cli_final).
 """
@@ -19,19 +21,33 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 # Residual sd that a day-1 global ensemble typically expresses on its own at these stations
-# (p10-p90 spread of about 3-4F seen live 2026-11-04 -> sd about 1.4F). sigma_f is the extra
+# (p10-p90 spread of 2-3F seen live 2026-11-04/05 -> sd about 1.0F). sigma_f is the extra
 # spread the model must add so total spread matches the observed residuals.
-ENSEMBLE_OWN_SD_F = 1.4
-MIN_SIGMA_F = 0.5
+ENSEMBLE_OWN_SD_F = 1.0
+MIN_SIGMA_F = 0.7
 MAX_SIGMA_F = 4.0
 MIN_DAYS_FOR_BIAS = 30
+
+# Live ensemble composition (Open-Meteo ensemble API, verified 2026-11-04): 31 GEFS members
+# and 51 ECMWF ENS members. The combined bias is weighted the same way, and each model's
+# own bias is applied to its members (model.ModelParams.bias_by_model).
+MEMBER_WEIGHTS = {"gfs": 31.0, "ecmwf": 51.0}
+
+
+def model_key(model_name: str) -> str | None:
+    n = model_name.lower()
+    if "ecmwf" in n:
+        return "ecmwf"
+    if "gfs" in n or "gefs" in n:
+        return "gfs"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
 class StationFit:
     code: str
     n: int
-    bias_f: float  # mean(actual - forecast), rounded to 0.1
+    bias_f: float  # member-weighted mean(actual - forecast), rounded to 0.1
     mae: float
     resid_sd: float
     sigma_f: float  # suggested model parameter
@@ -40,6 +56,15 @@ class StationFit:
     @property
     def usable(self) -> bool:
         return self.n >= MIN_DAYS_FOR_BIAS
+
+    def bias_by_key(self) -> dict[str, float]:
+        """{'gfs': bias, 'ecmwf': bias} for the models that were fitted."""
+        out: dict[str, float] = {}
+        for m, (_n, b, _mae) in self.by_model.items():
+            k = model_key(m)
+            if k is not None:
+                out[k] = round(b, 1)
+        return out
 
 
 def _mean(xs: Sequence[float]) -> float:
@@ -70,7 +95,13 @@ def fit_station(
         if res:
             by_model[m] = (len(res), round(_mean(res), 2), round(_mean([abs(r) for r in res]), 2))
     common = [d for d in actual if all(d in fc for fc in forecasts.values())]
-    res = [actual[d] - _mean([fc[d] for fc in forecasts.values()]) for d in common]
+    weights = {m: MEMBER_WEIGHTS.get(model_key(m) or "", 1.0) for m in forecasts}
+    wsum = sum(weights.values()) or 1.0
+
+    def combined(d: str) -> float:  # member-weighted mean forecast, like the live mixture
+        return sum(weights[m] * fc[d] for m, fc in forecasts.items()) / wsum
+
+    res = [actual[d] - combined(d) for d in common]
     if not res:
         return StationFit(code, 0, 0.0, 0.0, 0.0, 1.5, by_model)
     bias = round(_mean(res), 1)
@@ -122,6 +153,8 @@ def calibration_yaml(fits: Iterable[StationFit], offsets: Mapping[int, float] | 
         any_station = True
         lines.append(f"  {f.code}:  # n={f.n} mae={f.mae} resid_sd={f.resid_sd}")
         lines.append(f"    bias_f: {f.bias_f}")
+        for k, b in sorted(f.bias_by_key().items()):
+            lines.append(f"    bias_{k}_f: {b}")
         lines.append(f"    sigma_f: {f.sigma_f}")
     if not any_station:
         lines.append("  {}")

@@ -55,18 +55,24 @@ def make_engine(cfg: AppConfig, sources: WeatherSources) -> WeatherEngine:
     offsets = w.offsets()
     params = ModelParams(
         sigma_f=w.sigma_f, nws_weight=w.nws_weight, nws_sigma_f=w.nws_sigma_f, bias_f=w.bias_f,
-        obs_offsets=offsets,
+        nws_bias_f=w.nws_bias_f, obs_offsets=offsets,
     )  # fmt: skip
-    per_station = {
-        code: ModelParams(
+    per_station = {}
+    for code, o in w.stations.items():
+        by_model = {}
+        if o.bias_gfs_f is not None:
+            by_model["gfs"] = o.bias_gfs_f
+        if o.bias_ecmwf_f is not None:
+            by_model["ecmwf"] = o.bias_ecmwf_f
+        per_station[code] = ModelParams(
             sigma_f=w.sigma_f if o.sigma_f is None else o.sigma_f,
             nws_weight=w.nws_weight if o.nws_weight is None else o.nws_weight,
             nws_sigma_f=w.nws_sigma_f if o.nws_sigma_f is None else o.nws_sigma_f,
             bias_f=w.bias_f if o.bias_f is None else o.bias_f,
+            bias_by_model=by_model,
+            nws_bias_f=w.nws_bias_f if o.nws_bias_f is None else o.nws_bias_f,
             obs_offsets=offsets,
         )
-        for code, o in w.stations.items()
-    }
     return WeatherEngine(
         sources,
         params,

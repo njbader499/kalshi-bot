@@ -8,6 +8,7 @@ from kalshi_maker.weather.fit import (
     MIN_DAYS_FOR_BIAS,
     calibration_yaml,
     fit_station,
+    model_key,
     offset_table,
 )
 from kalshi_maker.weather.model import DEFAULT_OBS_OFFSETS, ModelParams
@@ -18,13 +19,15 @@ def test_fit_recovers_a_cold_bias() -> None:
     actual = {d: 80.0 + (i % 5) for i, d in enumerate(days)}
     gfs = {d: actual[d] - 3.0 + (0.5 if i % 2 else -0.5) for i, d in enumerate(days)}
     ecm = {d: actual[d] - 2.0 for d in days}
-    f = fit_station("CLIMIA", actual, {"gfs_seamless": gfs, "ecmwf_ifs025": ecm})
+    f = fit_station("CLIMIA", actual, {"gfs_global": gfs, "ecmwf_ifs025": ecm})
     assert f.n == 35 and f.usable
-    assert f.bias_f == pytest.approx(2.5, abs=0.11)  # mean of the two models' biases
-    assert f.by_model["gfs_seamless"][1] == pytest.approx(3.0, abs=0.01)
+    # combined bias is weighted like the live ensemble (31 GEFS : 51 ECMWF members)
+    assert f.bias_f == pytest.approx((31 * 3.0 + 51 * 2.0) / 82, abs=0.06)
+    assert f.by_model["gfs_global"][1] == pytest.approx(3.0, abs=0.01)
     assert f.by_model["ecmwf_ifs025"][1] == pytest.approx(2.0, abs=0.01)
-    assert 0.5 <= f.sigma_f <= 4.0
-    ModelParams(bias_f=f.bias_f, sigma_f=f.sigma_f)  # within the model's bounds
+    assert f.bias_by_key() == {"gfs": 3.0, "ecmwf": 2.0}
+    assert 0.7 <= f.sigma_f <= 4.0
+    ModelParams(bias_f=f.bias_f, sigma_f=f.sigma_f, bias_by_model=f.bias_by_key())
 
 
 def test_fit_with_no_overlap_is_unusable() -> None:
@@ -52,5 +55,17 @@ def test_yaml_fragment_only_includes_usable_fits() -> None:
     bad = fit_station("CLINYC", {"2026-11-01": 70.0}, {"m": {"2026-11-01": 69.0}})
     text = calibration_yaml([good, bad], {-1: 0.05, 0: 0.5, 1: 0.4, 2: 0.05})
     assert "  CLIMIA:" in text and "bias_f: 2.0" in text
+    assert "bias_gfs_f" not in text  # model "m" is neither gfs nor ecmwf: no per-model line
+    lax = fit_station(
+        "CLILAX", {d: 75.0 for d in days},
+        {"gfs_global": {d: 74.7 for d in days}, "ecmwf_ifs025": {d: 80.1 for d in days}},
+    )  # fmt: skip
+    text2 = calibration_yaml([lax], None)
+    assert "bias_gfs_f: 0.3" in text2 and "bias_ecmwf_f: -5.1" in text2
     assert "CLINYC: only 1 days" in text and f"need {MIN_DAYS_FOR_BIAS}" in text
     assert '"0": 0.5' in text
+
+
+def test_model_key_recognises_open_meteo_names() -> None:
+    assert model_key("gfs_global") == "gfs" and model_key("gfs_seamless") == "gfs"
+    assert model_key("ecmwf_ifs025") == "ecmwf" and model_key("icon_seamless") is None

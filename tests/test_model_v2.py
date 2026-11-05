@@ -21,6 +21,7 @@ from kalshi_maker.weather.model import (
     bound_distribution,
     combine_with_bound,
     integer_distribution,
+    model_of_member,
     prob_in,
 )
 from kalshi_maker.weather.sources import EnsembleData
@@ -84,6 +85,27 @@ def test_offsets_are_validated() -> None:
         ModelParams(obs_offsets={5: 1.0})  # out of range
 
 
+def test_bias_goes_to_members_per_model_and_not_to_nws() -> None:
+    p = ModelParams(sigma_f=0.3, nws_sigma_f=0.3, nws_weight=0.5,
+                    bias_f=0.0, bias_by_model={"gfs": 3.0, "ecmwf": -2.0})  # fmt: skip
+    assert model_of_member("temperature_2m_member03_ncep_gefs_seamless") == "gfs"
+    assert model_of_member("temperature_2m_ecmwf_ifs025_ensemble") == "ecmwf"
+    assert model_of_member("temperature_2m_icon") is None
+    keys = ["temperature_2m_member01_ncep_gefs_seamless", "temperature_2m_ecmwf_ifs025_ensemble"]
+    biases = [p.bias_for(k) for k in keys]
+    assert biases == [3.0, -2.0] and p.bias_for("temperature_2m_other") == 0.0
+    d = integer_distribution([70.0, 70.0], 75.0, p, member_biases=biases)
+    # members land at 73 and 68 (0.25 weight each); NWS stays at 75 (0.5), unbiased
+    assert d[73] == pytest.approx(0.25, abs=0.03)
+    assert d[68] == pytest.approx(0.25, abs=0.03)
+    assert d[75] == pytest.approx(0.5, abs=0.05)
+    assert 70 not in d or d[70] < 0.01  # nothing left at the raw member value
+    with pytest.raises(ValueError):
+        ModelParams(bias_by_model={"icon": 1.0})
+    with pytest.raises(ValueError):
+        integer_distribution([70.0], None, p, member_biases=[1.0, 2.0])
+
+
 def test_reported_integer_rounding_with_zero_bias() -> None:
     p = ModelParams(sigma_f=0.3, nws_weight=0.0, bias_f=0.0)
     assert integer_distribution([70.9], None, p)[71] > 0.85
@@ -123,8 +145,11 @@ class Sources:
     async def ensemble(self, st: Any) -> EnsembleData:
         times = [DAY_START + timedelta(hours=i) for i in range(48)]
         members = {
-            f"m{i}": [self.curve(pk, h) for h in range(48)] for i, pk in enumerate(self.peaks)
-        }
+            (f"temperature_2m_member{i:02d}_ncep_gefs_seamless" if i % 2
+             else f"temperature_2m_member{i:02d}_ecmwf_ifs025_ensemble"):
+            [self.curve(pk, h) for h in range(48)]
+            for i, pk in enumerate(self.peaks)
+        }  # fmt: skip
         return EnsembleData(times, members, datetime.now(UTC))
 
     async def nws_hourly(self, st: Any) -> list[tuple[datetime, float]]:
@@ -239,6 +264,23 @@ async def test_per_station_params_override_the_global_ones() -> None:
     fv = await price(eng(Sources(), now, station_params={"CLINYC": warm}), [B72, B76])
     assert fv[B76["ticker"]].p > fv[B72["ticker"]].p  # peaks 72-74 + 3 = 75-77
     assert fv[B76["ticker"]].detail["params"]["bias_f"] == 3.0
+
+
+async def test_per_model_bias_corrects_only_that_models_members() -> None:
+    now = DAY_START - timedelta(hours=8)
+    # ECMWF members 4F too warm at this station, GEFS fine: the corrected median moves
+    # down by about half the ECMWF bias (members alternate gfs/ecmwf in the fixture)
+    p = ModelParams(sigma_f=0.5, nws_weight=0.0, bias_by_model={"ecmwf": -4.0})
+    base = ModelParams(sigma_f=0.5, nws_weight=0.0)
+    fv = await price(eng(Sources(), now, station_params={"CLINYC": p}), [B72, B76])
+    fv0 = await price(eng(Sources(), now, station_params={"CLINYC": base}), [B72, B76])
+    d = fv[B72["ticker"]].detail
+    assert d["params"]["bias_by_model"] == {"ecmwf": -4.0}
+    assert d["ens_p10_p50_p90"] == fv0[B72["ticker"]].detail["ens_p10_p50_p90"]  # raw unchanged
+    assert d["ens_p50_corrected"] < d["ens_p10_p50_p90"][1]
+    # the ECMWF half of the members now sits at 68-70: 72-73 loses about half its mass
+    assert fv[B72["ticker"]].p < fv0[B72["ticker"]].p * D("0.7")
+    assert fv[B76["ticker"]].p <= fv0[B76["ticker"]].p
 
 
 async def test_event_probabilities_still_sum_to_one() -> None:

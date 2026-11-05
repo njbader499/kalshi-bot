@@ -64,20 +64,28 @@ class DayModel:
     detail: dict[str, object]
 
 
+def member_extremes_by_key(
+    ens: EnsembleData, start: datetime, end: datetime, kind: str, min_hours: int | None = None
+) -> dict[str, float]:
+    """{member series name: extreme over [start, end)}. Members with too few hours are
+    dropped. The name carries the model (gfs/ecmwf), which selects the member's bias."""
+    idx = [i for i, t in enumerate(ens.times) if start <= t < end]
+    if not idx:
+        return {}
+    need = MIN_MEMBER_HOURS if min_hours is None else min_hours
+    out: dict[str, float] = {}
+    for key, vals in ens.members.items():
+        xs = [v for v in (vals[i] for i in idx) if v is not None]
+        if xs and len(xs) >= need:
+            out[key] = max(xs) if kind == "max" else min(xs)
+    return out
+
+
 def member_extremes(
     ens: EnsembleData, start: datetime, end: datetime, kind: str, min_hours: int | None = None
 ) -> list[float]:
-    """Each member's extreme over [start, end). Members with too few hours are dropped."""
-    idx = [i for i, t in enumerate(ens.times) if start <= t < end]
-    if not idx:
-        return []
-    need = MIN_MEMBER_HOURS if min_hours is None else min_hours
-    out: list[float] = []
-    for vals in ens.members.values():
-        xs = [v for v in (vals[i] for i in idx) if v is not None]
-        if xs and len(xs) >= need:
-            out.append(max(xs) if kind == "max" else min(xs))
-    return out
+    """Each member's extreme over [start, end) (values only)."""
+    return list(member_extremes_by_key(ens, start, end, kind, min_hours).values())
 
 
 def _quantiles(ms: list[float]) -> tuple[float, float, float]:
@@ -115,7 +123,10 @@ class WeatherEngine:
         detail: dict[str, object] = {
             "model": "v2",
             "window_utc": f"{start:%m-%d %H:%M}..{end:%m-%d %H:%M}",
-            "params": {"bias_f": p.bias_f, "sigma_f": p.sigma_f, "nws_w": p.nws_weight},
+            "params": {
+                "bias_f": p.bias_f, "bias_by_model": dict(p.bias_by_model),
+                "sigma_f": p.sigma_f, "nws_w": p.nws_weight, "nws_bias_f": p.nws_bias_f,
+            },
         }
 
         cli = [r for r in await self.sources.cli_reports(st) if r.day == day]
@@ -131,13 +142,16 @@ class WeatherEngine:
         detail["remaining_hours"] = remaining_hours
         conf = 1.0
         members: list[float] = []
+        biases: list[float] = []
         remaining: Dist | None = None
         nws_val: float | None = None
         if remaining_hours > 0:
             try:
                 ens = await self.sources.ensemble(st)
                 need = max(1, int(remaining_hours * MIN_REMAINING_FRACTION))
-                members = member_extremes(ens, rem_start, end, kind, min_hours=need)
+                by_key = member_extremes_by_key(ens, rem_start, end, kind, min_hours=need)
+                members = list(by_key.values())
+                biases = [p.bias_for(k) for k in by_key]
                 if (now - ens.fetched_at).total_seconds() > 6 * 3600:
                     conf *= 0.7
             except Exception as e:
@@ -145,13 +159,15 @@ class WeatherEngine:
             detail["members"] = len(members)
             if members:
                 detail["ens_p10_p50_p90"] = _quantiles(members)
+                corrected = sorted(m + b for m, b in zip(members, biases, strict=True))
+                detail["ens_p50_corrected"] = round(corrected[len(members) // 2], 1)
             nws_val = await self._nws_remaining(st, kind, day, rem_start, end, now, detail)
             if members or nws_val is not None:
                 if len(members) < 40:
                     conf *= 0.6 if members else 0.4
                 if nws_val is None:
                     conf *= 0.85
-                remaining = integer_distribution(members, nws_val, p)
+                remaining = integer_distribution(members, nws_val, p, member_biases=biases)
             else:
                 conf *= 0.4  # nothing to forecast the rest of the day with
         detail["nws"] = nws_val

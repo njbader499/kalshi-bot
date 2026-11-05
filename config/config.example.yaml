@@ -104,7 +104,8 @@ weather:
   sigma_f: 1.5                 # extra spread around each ensemble member's remaining extreme
   nws_weight: 0.5              # weight of the NWS forecast (hourly max, lifted by the daily high)
   nws_sigma_f: 2.0
-  bias_f: 1.0                  # added to every forecast component (F); provisional prior
+  bias_f: 1.0                  # added to ENSEMBLE MEMBERS only (F); provisional prior
+  nws_bias_f: 0.0              # the NWS forecast is forecaster-adjusted: leave at 0
   min_confidence: 0.6          # below this, no quote
   fair_interval_minutes: 10
   settlement_check_minutes: 60
@@ -116,7 +117,10 @@ weather:
   # official intraday CLI value exists (hourly obs lag a rising temperature).
   ramp_start_hour: 10
   ramp_end_hour: 16
-  stations: {}                 # e.g. {CLIMIA: {bias_f: 3.0, sigma_f: 1.2}} from the calibrator
+  # Per-station fits from the calibrator, e.g.
+  #   CLIMIA: {bias_f: 2.0, bias_gfs_f: 1.2, bias_ecmwf_f: 2.5, sigma_f: 1.0}
+  # bias_gfs_f / bias_ecmwf_f apply to that model's members; bias_f is the fallback.
+  stations: {}
 
 # Quoting fair value = blend of the MODEL and the REAL market (prod public book; on prod the
 # live book). A market where the model disagrees with the market by more than

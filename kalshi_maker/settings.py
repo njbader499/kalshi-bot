@@ -204,12 +204,18 @@ class MarketsCfg(_Strict):
 
 
 class StationModelCfg(_Strict):
-    """Per-station overrides of the model parameters (fit by scripts/calibrate_weather.py)."""
+    """Per-station overrides of the model parameters (fit by scripts/calibrate_weather.py).
 
-    bias_f: float | None = Field(default=None, ge=-5, le=5)
+    bias_gfs_f / bias_ecmwf_f apply to that model's ensemble members; bias_f is the fallback
+    for members of an unknown model. None = inherit the global value."""
+
+    bias_f: float | None = Field(default=None, ge=-6, le=6)
+    bias_gfs_f: float | None = Field(default=None, ge=-6, le=6)
+    bias_ecmwf_f: float | None = Field(default=None, ge=-6, le=6)
     sigma_f: float | None = Field(default=None, ge=0.3, le=10)
     nws_weight: float | None = Field(default=None, ge=0, le=1)
     nws_sigma_f: float | None = Field(default=None, ge=0.3, le=10)
+    nws_bias_f: float | None = Field(default=None, ge=-6, le=6)
 
 
 class WeatherCfg(_Strict):
@@ -222,7 +228,8 @@ class WeatherCfg(_Strict):
     sigma_f: float = Field(ge=0.3, le=10)
     nws_weight: float = Field(ge=0, le=1)
     nws_sigma_f: float = Field(ge=0.3, le=10)
-    bias_f: float = Field(ge=-5, le=5)
+    bias_f: float = Field(ge=-6, le=6)  # ensemble members only (per model via stations)
+    nws_bias_f: float = Field(default=0.0, ge=-6, le=6)  # NWS is forecaster-adjusted: keep 0
     min_confidence: float = Field(ge=0, le=1)
     fair_interval_minutes: int = Field(ge=1, le=240)
     settlement_check_minutes: int = Field(ge=5, le=1440)

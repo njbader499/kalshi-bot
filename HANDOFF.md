@@ -36,7 +36,11 @@ funded with $500. API tier Basic.
    old sigma/weight/bias values would keep the old behaviour.
 4. `.\.venv\Scripts\python.exe scripts\calibrate_weather.py --days 365 --out config\weather_calibration.yaml`
    and paste its `stations:` block (and `obs_offset_probs` once it has data) under
-   `weather:` in config.yaml. Check the NCEI station names it prints.
+   `weather:` in config.yaml. Check the NCEI station names it prints. The block carries
+   `bias_gfs_f` / `bias_ecmwf_f` per station (applied to that model's members) plus the
+   member-weighted `bias_f` fallback and `sigma_f`; the script prints the full-window and
+   last-90-day fits and uses the recent one when it has ≥ 60 days. The NWS component is
+   never biased by this fit (`weather.nws_bias_f` stays 0).
 5. `python -m kalshi_maker fair` and compare the fair values with the prod bid/ask: the
    leading bracket should now be near the market, and "not quoted" reasons should be rare.
 6. `python -m kalshi_maker risk-reset --confirm`, delete `KILL` if present, restart the
